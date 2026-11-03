@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Тестовое мини-приложение</title>
+  <!-- официальный telegram-web-app.js (копия из пакета @twa-dev/sdk 8.0.2) -->
+  <script src="/telegram-web-app.js"></script>
+</head>
+<body>
+  <h1 id="title">Биржа (тест)</h1>
+  <button id="markets">Рынки</button>
+  <div class="row"><span class="cell">Купить <b>TON</b></span></div>
+  <div id="fee" style="cursor:pointer" onclick="window.__appState.fee = true">Комиссия <span>0.1%</span></div>
+  <label for="price">Цена</label>
+  <input id="price" name="price" inputmode="decimal">
+  <input id="pin" type="password" name="pin" placeholder="PIN">
+  <div id="out"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
