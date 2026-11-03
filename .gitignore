@@ -1,7 +1,9 @@
 # входы в аккаунты Telegram — дают полный доступ к аккаунту
 *.session
 *.session-journal
+*.lock
 sessions/
+browser/
 
 # личные настройки: API_ID/API_HASH, токены
 config.py

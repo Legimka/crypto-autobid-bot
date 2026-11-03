@@ -69,9 +69,10 @@ def test_parse_command():
     assert chat.parse_command("45.68") == ("send", "45.68")
     assert chat.parse_command("> 100") == ("send", "100")
     assert chat.parse_command("!q") == ("quit",) and chat.parse_command("!выход") == ("quit",)
+    assert chat.parse_command("q") == ("quit",) and chat.parse_command("стоп") == ("quit",)   # стоп-слова
     assert chat.parse_command("!s") == ("screen",) and chat.parse_command("?") == ("help",)
-    assert chat.parse_command("") == ("noop",)
-    assert chat.parse_command("q") == ("send", "q")    # в интерактиве «q» — это текст боту
+    assert chat.parse_command("") == ("noop",) and chat.parse_command(">  ") == ("noop",)
+    assert chat.parse_command("> q") == ("send", "q")   # отправить «q» боту — только явно, через «>»
 
 
 def test_handle_renders_and_logs(rec, tmp_path):
@@ -181,6 +182,45 @@ async def test_own_message_event_before_send_returns_is_not_duplicated(rec):
     holder["r"] = r
     await r.send_text("45.68")
     assert sum("45.68" in line for line in r.lines) == 1
+
+
+async def test_press_single_shot_on_server_timeout(rec):
+    # -503/перегрузка приходит как ValueError('Request was unsuccessful ...') — обрабатываем как таймаут,
+    # запись не падает, нажатие не повторяется (повтор отключён внутри _callback)
+    r = rec(FakeClient(error=ValueError("Request was unsuccessful 6 time(s)")))
+    r.handle(message(10, "Меню", MENU), "new")
+    assert await r.press(2) is True
+    assert "не подтвердил" in r.lines[-1]
+
+
+async def test_send_text_empty_and_error_do_not_crash(rec):
+    r = rec(FakeClient())
+    assert await r.send_text("") is False and await r.send_text("   ") is False
+
+    class BlockClient(FakeClient):
+        async def send_message(self, entity, text, **kw):
+            raise errors.YouBlockedUserError(request=None)
+
+    r2 = rec(BlockClient())
+    assert await r2.send_text("45.68") is False and "разблокируй" in r2.lines[-1]
+
+
+def test_copy_button_and_screen_token_masked(rec, tmp_path):
+    r = rec()
+    tok = "9009:AAzQcB2X6RBK3U7FbVgAOQu1CEyxDqdQHk5zz"
+    btn = types.KeyboardInlineButton(text="Токен", type=types.InlineButtonTypeCopy(copy_text=tok))
+    r.handle(message(10, f"API Token: {tok}", inline([btn])), "new")
+    r.close()
+    blob = "\n".join(r.lines) + open(f"{tmp_path}/events.jsonl", encoding="utf-8").read()
+    assert "AAzQcB2X" not in blob
+
+
+async def test_bare_number_refused_when_newest_is_prompt(rec):
+    r = rec()
+    r.handle(message(10, "Карточка объявления", MENU), "new")       # экран с кнопками #10
+    r.handle(message(11, "Пришлите новый объём в USDT"), "new")      # запрос ввода без кнопок — новейшее
+    assert await r.press(2) is False                                 # без @id кнопку на старом экране не жмём
+    assert "> 2" in r.lines[-1] and "2@10" in r.lines[-1]
 
 
 async def test_url_button_to_mini_app_gives_hint(rec):

@@ -19,11 +19,12 @@ import json
 import os
 import re
 import sys
-from urllib.parse import urlsplit
+import traceback
+from urllib.parse import unquote, urlsplit
 
 from .. import accounts, bots, redact, settings
 from . import launch as L
-from .common import ConsoleLines, EventLog, make_recording_dir, utf8_console
+from .common import STOP_WORDS, ConsoleLines, EventLog, make_recording_dir, utf8_console
 from .summary import write_summary
 
 SHIM_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webview_shim.js")
@@ -44,7 +45,8 @@ REQ_HEADERS_DROP = {"accept-encoding", "user-agent", "accept-language", "upgrade
                     "cache-control", "priority", "dnt", "connection", "accept"}
 RESP_HEADERS_KEEP = {"content-type", "content-length", "location", "set-cookie", "retry-after", "x-request-id"}
 TEXT_TYPES = ("json", "text", "javascript", "xml", "x-www-form-urlencoded", "event-stream", "graphql")
-STOP_WORDS = {"q", "!q", "stop", "стоп", "выход", "exit"}
+ASSET_CTYPES = ("javascript", "ecmascript", "html")   # сохраняем как файл приложения, не кладём тело в журнал
+_WS_SECRET = re.compile(rb"(?i)token|secret|passw|session|cookie|init_?data|eyJ")
 
 
 def _truncate(text):
@@ -54,15 +56,20 @@ def _truncate(text):
 
 
 def mask_storage_value(key, value, secure=False):
-    """Значения хранилищ приложения (CloudStorage, DeviceStorage): там бывают токены сессии."""
+    """Значения хранилищ приложения (CloudStorage, DeviceStorage): там бывают токены сессии и PIN-коды."""
     if value is None:
         return None
     if secure or redact.key_rule(key or "") in ("strong", "suffix", "weak"):
         return redact.MASK
     v = redact.redact_value(key, value)
-    if v == value and isinstance(value, str) and len(value) >= 24 and not re.search(r"\s", value):
-        return f"{redact.MASK} ({len(value)} симв.)"
-    return v
+    if v != value or not isinstance(value, str):
+        return v
+    low = value.strip().lower()
+    # Очевидно безобидное оставляем: флаги, язык/тема (ru, en-US, dark), фразы с пробелами.
+    if low in ("", "true", "false", "null", "0", "1") or re.fullmatch(r"[a-z]{2,8}(?:[-_][a-z]{2,4})?", low) \
+            or re.search(r"\s", value):
+        return value
+    return f"{redact.MASK} ({len(value)} симв.)"   # короткий непрозрачный токен/PIN — тоже скрываем
 
 
 def sanitize_tg(method, params):
@@ -121,6 +128,9 @@ class WebAppRecorder:
         self.closed = asyncio.Event()
         self.tasks = set()
         self.dialog_waiter = None
+        self.app_page = None          # страница самого приложения; биндинги принимаем только из её главного фрейма
+        self.learned = set()          # непрозрачные секреты из заголовков (Authorization, Cookie) — вычистить в конце
+        self.opened = False           # приложение реально открылось (страница загрузилась)
 
     # ------------------------------------------------------------------ подключение к браузеру
     def shim_source(self):
@@ -134,6 +144,7 @@ class WebAppRecorder:
         await context.expose_binding("__autobidInvoke", self._on_invoke)
         await context.add_init_script(self.shim_source())
         context.on("request", self._on_request)
+        context.on("response", self._on_response)
         context.on("requestfinished", lambda r: self._spawn(self._on_finished(r)))
         context.on("requestfailed", self._on_failed)
         context.on("page", self._on_page)
@@ -191,32 +202,50 @@ class WebAppRecorder:
                 except Exception:
                     pass
                 return
-            self.echo(f"❓ Приложение спрашивает: «{message}»\n   Ответь здесь: y — да/OK, n — отмена"
-                      + (", или впиши текст и Enter" if kind == "prompt" else ""))
-            fut = asyncio.get_running_loop().create_future()
-            self.dialog_waiter = fut
-            try:
-                answer = await asyncio.wait_for(fut, 600)
-            except asyncio.TimeoutError:
-                answer = "n"
-            finally:
-                self.dialog_waiter = None
-            low = (answer or "").strip().lower()
-            if low in ("n", "no", "нет", "н"):
-                await dialog.dismiss()
-                result = "dismissed"
-            else:
-                await dialog.accept(answer if kind == "prompt" and low not in ("y", "yes", "да", "д") else
-                                    (dialog.default_value or ""))
-                result = "accepted"
+            self.echo(f"❓ Приложение спрашивает: «{message}»\n   Ответь здесь: да/y — подтвердить, "
+                      "нет/n или Enter — отмена" + (", либо впиши текст и Enter" if kind == "prompt" else ""))
+            yes, no = {"y", "yes", "да", "д", "ok", "ок"}, {"n", "no", "нет", "н", "отмена", "cancel"}
+            while True:
+                fut = asyncio.get_running_loop().create_future()
+                self.dialog_waiter = fut
+                try:
+                    answer = await asyncio.wait_for(fut, 600)
+                except asyncio.TimeoutError:
+                    answer = ""
+                finally:
+                    self.dialog_waiter = None
+                low = (answer or "").strip().lower()
+                if kind == "prompt" and answer and low not in yes and low not in no and low not in STOP_WORDS:
+                    await dialog.accept(answer)                 # для prompt непустой текст — это и есть ввод
+                    result = "accepted:text"
+                elif low in yes:
+                    await dialog.accept(dialog.default_value or "")
+                    result = "accepted"
+                elif low in no or low == "" or low in STOP_WORDS:
+                    await dialog.dismiss()
+                    result = "dismissed"
+                else:
+                    self.echo("   не понял — напиши да или нет")
+                    continue
+                break
             self.log.write("dialog_answer", type=kind, result=result)
         except Exception as e:   # страница закрылась, пока ждали ответ
             self.log.write("dialog_answer", type=kind, error=str(e)[:200])
+
+    def _is_app_main(self, page, frame):
+        """Главный фрейм самой страницы приложения? (до её создания app_page=None — всё своё, принимаем)."""
+        if self.app_page is None:
+            return True
+        return page is self.app_page and frame is getattr(page, "main_frame", None)
 
     def _on_rec(self, source, kind, payload=None):
         payload = payload if isinstance(payload, dict) else {"value": payload}
         frame = source.get("frame") if isinstance(source, dict) else None
         page = source.get("page") if isinstance(source, dict) else None
+        # Из чужих фреймов/вкладок (сторонний iframe, окно от openLink) берём только действия пользователя,
+        # а события Telegram/служебные (в т.ч. поддельный «stop») — нет.
+        if not self._is_app_main(page, frame) and kind not in ("click", "input", "key", "submit"):
+            return
         if kind == "tg":
             payload["params"] = sanitize_tg(payload.get("method", ""), payload.get("params"))
         if kind in ("click", "input", "key", "submit", "tg_ui"):
@@ -235,6 +264,12 @@ class WebAppRecorder:
             self.echo(f"🔘 Telegram: {payload.get('what')} «{payload.get('text')}»")
 
     async def _on_invoke(self, source, what, params=None):
+        page = source.get("page") if isinstance(source, dict) else None
+        frame = source.get("frame") if isinstance(source, dict) else None
+        if not self._is_app_main(page, frame):
+            # вызов из чужого фрейма/вкладки: иначе сторонний iframe прочитал бы CloudStorage реального аккаунта
+            self.log.write("tg_custom_method", error="FORBIDDEN_FRAME")
+            return {"error": "FORBIDDEN"}
         if what != "custom_method" or not isinstance(params, dict):
             return {"error": "UNSUPPORTED"}
         method, args = params.get("method"), params.get("params")
@@ -251,12 +286,39 @@ class WebAppRecorder:
         self.log.write("tg_custom_method", method=method, params=logged, result=shown)
         return {"result": result}
 
+    # ------------------------------------------------------------------ секреты из заголовков
+    def _add_secret(self, v):
+        v = (v or "").strip()
+        if len(v) >= 12 and redact.MASK not in v and not re.search(r"\s", v):
+            self.learned.add(v)
+
+    def _learn(self, headers):
+        """Запомнить непрозрачные секреты из заголовков, чтобы вычистить их из всей записи в конце
+        (тот же токен часто возвращается в теле ответа под безобидным ключом result/data)."""
+        for name, value in (headers or {}).items():
+            k = name.lower()
+            if not value:
+                continue
+            if k in ("authorization", "proxy-authorization"):
+                self._add_secret(value.split(" ", 1)[1] if " " in value else value)
+            elif k in ("cookie", "set-cookie"):
+                for part in value.replace("\n", ";").split(";"):
+                    _, sep, val = part.strip().partition("=")
+                    if sep:
+                        self._add_secret(val)
+            elif redact.key_rule(k) in ("strong", "suffix", "weak") or any(p in k for p in ("auth", "session", "access")):
+                self._add_secret(value)
+
     # ------------------------------------------------------------------ сеть
     def _on_request(self, request):
         rtype = request.resource_type
         if rtype in SKIP_TYPES:
             self.skipped[rtype] = self.skipped.get(rtype, 0) + 1
             return
+        try:
+            self._learn(request.headers)
+        except Exception:
+            pass
         self.n_req += 1
         rid = self.req_ids[request] = self.n_req
         if len(self.req_ids) > MAX_TRACKED:      # запись на часы: старые запросы давно завершились
@@ -268,9 +330,10 @@ class WebAppRecorder:
                 entry["redirected_from"] = self.req_ids[request.redirected_from]
         except Exception:
             pass
-        if rtype not in ASSET_TYPES:
+        # Тело и заголовки нужны для обычных запросов и для любого не-GET (в т.ч. POST-навигации формой).
+        if rtype not in ASSET_TYPES or request.method != "GET":
             headers = {k: v for k, v in (request.headers or {}).items()
-                       if k.lower() not in REQ_HEADERS_DROP and not k.lower().startswith("sec-")}
+                       if k.lower() not in REQ_HEADERS_DROP and not k.lower().startswith("sec-fetch")}
             entry["headers"] = redact.redact_headers(headers)
             body = None
             try:
@@ -284,6 +347,20 @@ class WebAppRecorder:
                 as_json, as_text = redact.redact_body(body, headers.get("content-type", ""))
                 entry["body"] = as_json if as_json is not None else _truncate(as_text)
         self.log.write("request", **entry)
+
+    def _on_response(self, response):
+        """Потоковые ответы (event-stream) никогда не доходят до requestfinished — ловим их статус здесь."""
+        req = response.request
+        if req.resource_type != "eventsource" or req not in self.req_ids:
+            return
+        try:
+            self._learn(response.headers)
+        except Exception:
+            pass
+        self.log.write("response", id=self.req_ids[req], status=response.status,
+                       url=redact.redact_url(req.url),
+                       headers=redact.redact_headers(response.headers or {}, keep=RESP_HEADERS_KEEP),
+                       note="поток event-stream — тело не сохраняется")
 
     def _on_failed(self, request):
         rid = self.req_ids.get(request)
@@ -307,6 +384,10 @@ class WebAppRecorder:
         except Exception:
             headers = dict(resp.headers or {})
         ctype = headers.get("content-type", "")
+        try:
+            self._learn(headers)
+        except Exception:
+            pass
         entry["headers"] = redact.redact_headers(headers, keep=RESP_HEADERS_KEEP)
         try:
             timing = request.timing or {}
@@ -324,7 +405,8 @@ class WebAppRecorder:
             self.log.write("response", **entry)
             return
         entry["size"] = len(body)
-        if rtype in ASSET_TYPES:
+        # JS-чанки с предзагрузкой приходят типом 'other' — тоже сохраняем как файл, а не пишем тело в журнал
+        if rtype in ASSET_TYPES or any(t in ctype for t in ASSET_CTYPES):
             if self.save_assets:
                 entry["saved"] = self._save_asset(request.url, body, ctype, rtype)
         elif any(t in ctype for t in TEXT_TYPES) or not ctype:
@@ -385,11 +467,21 @@ class WebAppRecorder:
                 return
             st["logged_recv"] += 1
         if isinstance(payload, (bytes, bytearray)):
-            # стакан биржи часто приходит в двоичном виде (protobuf/msgpack) — сохраняем начало кадра,
-            # чтобы его можно было разобрать; исходящие (там бывает авторизация) — только размер
+            # Стакан биржи часто приходит в двоичном виде. Исходящие (там бывает авторизация) — только размер.
             data = {"binary_bytes": len(payload)}
             if direction == "recv":
-                data["b64"] = base64.b64encode(bytes(payload[:WS_BINARY_KEEP])).decode("ascii")
+                raw = bytes(payload[:WS_BINARY_KEEP])
+                try:
+                    text = raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    text = None
+                if text is not None:
+                    # кадр оказался текстом/JSON (бывает JSON через двоичный opcode) — чистим как текст
+                    as_json, as_text = redact.redact_body(text)
+                    data["text"] = as_json if as_json is not None else _truncate(as_text)
+                elif not _WS_SECRET.search(raw):
+                    data["b64"] = base64.b64encode(raw).decode("ascii")   # настоящий двоичный кадр без явных секретов
+                # иначе (двоичное + похоже на секрет) — оставляем только размер
         else:
             as_json, as_text = redact.redact_body(payload)
             data = as_json if as_json is not None else _truncate(as_text)
@@ -407,10 +499,13 @@ class WebAppRecorder:
                     line = await lines.get()
                     if line is None:            # консоли нет — ждём закрытия окна
                         await asyncio.Event().wait()
+                    stop = (line or "").strip().lower() in STOP_WORDS
                     if self.dialog_waiter is not None and not self.dialog_waiter.done():
-                        self.dialog_waiter.set_result(line)
+                        self.dialog_waiter.set_result(line)   # это ответ на вопрос приложения
+                        if stop:
+                            return                            # ответили стоп-словом → и вопрос закрыли, и выходим
                         continue
-                    if line.strip().lower() in STOP_WORDS:
+                    if stop:
                         return
             waiters.append(asyncio.ensure_future(read_console()))
         if duration:
@@ -425,11 +520,49 @@ class WebAppRecorder:
         self.log.write("stop", requests=self.n_req, skipped=self.skipped, ws=self.ws_stats,
                        assets=len(self.saved), assets_skipped=self.assets_skipped)
         self.log.close()
-        return write_summary(self.out_dir)
+        self._scrub_learned(os.path.join(self.out_dir, "events.jsonl"))
+        return write_summary(self.out_dir)   # summary строится из уже вычищенного журнала
+
+    def _scrub_learned(self, path):
+        """Непрозрачные токены из заголовков часто возвращаются в теле под безобидным ключом (result/data) —
+        финальный проход вычищает их из всей записи. summary читает журнал уже после этого."""
+        if not self.learned:
+            return
+        try:
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+        except OSError:
+            return
+        new = text
+        for v in sorted(self.learned, key=len, reverse=True):
+            new = new.replace(v, redact.MASK)
+        if new != text:
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(new)
+            except OSError:
+                pass
 
 
 # ---------------------------------------------------------------------- запуск из командной строки
-async def launch_browser(playwright, browser="auto", headless=False, profile_dir=None):
+def playwright_proxy(url):
+    """Прокси сессии → формат Playwright. SOCKS5 с логином/паролем Playwright открыть не умеет."""
+    if not url:
+        return None
+    u = urlsplit(url)
+    scheme = u.scheme.lower().replace("socks5h", "socks5")
+    if scheme in ("socks5", "socks4") and (u.username or u.password):
+        raise RuntimeError("Playwright не открывает SOCKS5 с логином и паролем. "
+                           "Запусти с --no-proxy (запись пойдёт с реального IP) или укажи http-прокси.")
+    p = {"server": f"{scheme}://{u.hostname}:{u.port}"}
+    if u.username:
+        p["username"] = unquote(u.username)
+    if u.password:
+        p["password"] = unquote(u.password)
+    return p
+
+
+async def launch_browser(playwright, browser="auto", headless=False, profile_dir=None, proxy=None):
     """Edge/Chrome с компьютера (качать ничего не надо), иначе Chromium от Playwright."""
     if browser != "auto":
         order = [browser]
@@ -439,8 +572,16 @@ async def launch_browser(playwright, browser="auto", headless=False, profile_dir
         order = ["chromium", "chrome", "msedge"]
     problems = []
     for name in order:
-        kwargs = dict(headless=headless, viewport=VIEWPORT, user_agent=ANDROID_UA, locale="ru-RU",
-                      bypass_csp=True, service_workers="block", args=["--window-size=460,1000"])
+        kwargs = dict(headless=headless, user_agent=ANDROID_UA, locale="ru-RU",
+                      bypass_csp=True, service_workers="block")
+        if headless:
+            kwargs.update(viewport=VIEWPORT, args=["--window-size=460,1000"])
+        else:
+            # окно подстраивается под экран, страница тянется за окном. С фиксированным viewport 412×860
+            # на обычных ноутбуках нижняя кнопка Telegram (эмуляция) уходила ниже края экрана.
+            kwargs.update(no_viewport=True, args=["--window-size=430,760"])
+        if proxy:
+            kwargs["proxy"] = proxy
         if name != "chromium":
             kwargs["channel"] = name
         elif os.environ.get("AUTOBID_CHROMIUM"):
@@ -454,10 +595,27 @@ async def launch_browser(playwright, browser="auto", headless=False, profile_dir
                        "\nПоставь Chromium для записи: python -m playwright install chromium")
 
 
-async def choose_launch(client, bot):
-    options = await L.list_options(client, bot)
-    if len(options) == 1 or not sys.stdin.isatty():
+def _flag_for(spec):
+    """Параметры запуска → как это открыть явным ключом (для подсказки без терминала)."""
+    mode = spec.get("mode")
+    if mode == "main":
+        return "--main"
+    if mode == "menu":
+        return "--menu"
+    if mode == "button":
+        return f'--button "{spec["button"]}"'
+    return f"--{mode}"
+
+
+async def choose_launch(client, bot, send_start=True):
+    options = await L.list_options(client, bot, send_start=send_start)
+    if len(options) == 1:
         return options[0][1]
+    if not sys.stdin.isatty():
+        print("Не понял, что открыть. Укажи одним из ключей и запусти снова:")
+        for label, spec in options:
+            print(f"  {_flag_for(spec):20} — {label}")
+        raise L.LaunchError("запусти с нужным ключом (--main / --button … / --menu)")
     print("Что открыть?")
     for i, (label, _) in enumerate(options, 1):
         print(f"  {i}. {label}")
@@ -494,6 +652,8 @@ def build_parser():
                    help="каким браузером открыть (auto: Edge → Chrome → Chromium)")
     p.add_argument("--no-assets", action="store_true", help="не сохранять файлы страниц и скрипты в assets/")
     p.add_argument("--no-start", action="store_true", help="не отправлять боту /start, если кнопки не нашлось")
+    p.add_argument("--no-proxy", action="store_true",
+                   help="не использовать прокси сессии для браузера (запись пойдёт с реального IP)")
     p.add_argument("--duration", type=float, default=0, help="закончить через столько секунд (0 — когда закроешь окно)")
     p.add_argument("--headless", action="store_true", help=argparse.SUPPRESS)
     return p
@@ -501,14 +661,23 @@ def build_parser():
 
 async def run(args):
     from playwright.async_api import async_playwright
-    from telethon import functions, types
+    from telethon import errors, functions, types
 
     bot_username = bots.resolve(args.bot)
+    try:
+        proxy = None if args.no_proxy else playwright_proxy(accounts.proxy_url(args.session))
+    except RuntimeError as e:
+        print(f"❌ {e}")
+        return 1
     client = await accounts.connect_authorized(args.session)
     rec = None
     prolong = None
     try:
-        bot = await client.get_input_entity(bot_username)
+        try:
+            bot = await client.get_input_entity(bot_username)
+        except (ValueError, errors.UsernameInvalidError, errors.UsernameNotOccupiedError):
+            print(f"❌ Не нашёл бота @{bot_username}")
+            return 1
         me = await client.get_me()
         account = ("@" + me.username) if getattr(me, "username", None) else (me.first_name or str(me.id))
         if args.url:
@@ -522,37 +691,53 @@ async def run(args):
         elif args.main:
             spec = {"mode": "main"}
         else:
-            spec = await choose_launch(client, bot)
+            spec = await choose_launch(client, bot, send_start=not args.no_start)
         launch = await L.request_launch(client, bot, start_param=args.start_param, platform=args.platform,
                                         send_start=not args.no_start, **spec)
         url = L.normalize_launch_url(launch.url, platform=args.platform)
 
-        label = args.label or (launch.button["text"] if launch.button else spec["mode"])
-        out_dir = make_recording_dir("webapp", bots.slug(bot_username), label)
+        # У прямой ссылки бот-владелец приложения может быть не тем, что в командной строке:
+        # CloudStorage и продление идут ему, папка и журнал подписываются по нему.
+        app_bot = launch.bot if launch.bot is not None else bot
+        app_user = launch.bot_username or bot_username
+        app_slug, app_title = bots.slug(app_user), bots.title(app_user)
 
         async def custom_method(method, params):
             res = await client(functions.bots.InvokeWebViewCustomMethodRequest(
-                bot=bot, custom_method=method, params=types.DataJSON(data=json.dumps(params or {}))))
+                bot=app_bot, custom_method=method, params=types.DataJSON(data=json.dumps(params or {}))))
             return json.loads(res.data)
 
-        rec = WebAppRecorder(out_dir, platform=args.platform, custom_method=custom_method,
-                             save_assets=not args.no_assets)
-        profile = os.path.join(settings.recordings_dir(), ".browser",
-                               re.sub(r"[^\w-]+", "_", f"{args.session}_{bots.slug(bot_username)}"))
+        profile = os.path.join(settings.browser_dir(), re.sub(r"[^\w-]+", "_", f"{args.session}_{app_slug}"))
         async with async_playwright() as pw:
-            context, browser_name = await launch_browser(pw, args.browser, args.headless, profile)
-            rec.log.write("start", bot=bot_username, bot_title=bots.title(bot_username), mode=launch.mode,
+            try:
+                context, browser_name = await launch_browser(pw, args.browser, args.headless, profile, proxy=proxy)
+            except RuntimeError as e:
+                print(f"❌ {redact.redact_text_kv(str(e))}")
+                return 1
+            label = args.label or (launch.button["text"] if launch.button else spec["mode"])
+            out_dir = make_recording_dir("webapp", app_slug, label)
+            rec = WebAppRecorder(out_dir, platform=args.platform, custom_method=custom_method,
+                                 save_assets=not args.no_assets)
+            rec.log.write("start", bot=app_user, bot_title=app_title, mode=launch.mode,
                           what=launch.title, url=redact.redact_url(url), platform=args.platform,
                           account=account, account_session=args.session, browser=browser_name)
             await rec.attach(context)
             if launch.query_id:
                 prolong = asyncio.ensure_future(L.prolong_loop(
-                    client, bot, launch.query_id, on_error=lambda e: rec.log.write("prolong_error", error=str(e))))
+                    client, app_bot, launch.query_id, on_error=lambda e: rec.log.write("prolong_error", error=str(e))))
             page = context.pages[0] if context.pages else await context.new_page()
-            print(f"\n🌐 {bots.title(bot_username)}: {launch.title} — открываю в {browser_name}.\n"
+            rec.app_page = page
+            print(f"\n🌐 {app_title}: {launch.title} — открываю в {browser_name}.\n"
                   f"⚠ Это твой настоящий аккаунт: всё, что сделаешь в окне, произойдёт по-настоящему.\n"
                   f"Кликай как обычно. Закончить: закрой окно браузера или напиши q и Enter.\n")
-            await page.goto(url, wait_until="commit")
+            try:
+                await page.goto(url, wait_until="commit")
+            except Exception as e:
+                msg = redact.redact_text_kv(str(e))     # в тексте ошибки Playwright бывает ссылка с initData
+                rec.log.write("goto_error", error=msg[:2000])
+                print(f"❌ Мини-приложение не открылось: {type(e).__name__}: {msg.splitlines()[0][:300]}")
+                return 1
+            rec.opened = True
             await rec.wait_until_done(duration=args.duration, console=True)
             await rec.drain()
             try:
@@ -568,7 +753,10 @@ async def run(args):
             prolong.cancel()
         if rec:
             rec.finish()
-            print(f"\n✅ Запись: {rec.out_dir}\n   Главное — summary.txt; пришли разработчику всю папку.")
+            if rec.opened:
+                print(f"\n✅ Запись: {rec.out_dir}\n   Главное — summary.txt; пришли разработчику всю папку.")
+            else:
+                print(f"\n⚠ Записать не получилось — в папке {rec.out_dir} ничего полезного, присылать нечего.")
         try:
             await client.disconnect()
         except Exception:
@@ -582,6 +770,17 @@ def main(argv=None):
         sys.exit(asyncio.run(run(args)) or 0)
     except KeyboardInterrupt:
         pass
-    except (settings.ConfigError, accounts.NotAuthorized) as e:
+    except (settings.ConfigError, accounts.NotAuthorized, accounts.SessionBusy) as e:
         print(f"❌ {e}")
+        sys.exit(1)
+    except (ConnectionError, OSError):
+        print("❌ Нет связи с Telegram — проверь интернет и прокси в config.py")
+        sys.exit(1)
+    except Exception as e:
+        # на всякий случай: ни один сырой traceback (в нём бывает ссылка с initData) не уходит в консоль
+        if type(e).__name__ == "FloodWaitError":
+            print(f"❌ Telegram просит подождать {getattr(e, 'seconds', '?')} с — попробуй позже")
+        else:
+            lines = redact.redact_text_kv(traceback.format_exc()).strip().splitlines()
+            print("❌ " + (lines[-1] if lines else "не получилось записать"))
         sys.exit(1)

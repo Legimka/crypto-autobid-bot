@@ -35,13 +35,18 @@ DIGIT_KEYS = {"card", "cardnumber", "cardno", "pan", "iban", "accountnumber", "b
 
 _JWT = re.compile(r"\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}")
 _AUTH_SCHEME = re.compile(r"(?i)\b(bearer|basic|tma|token)\s+[A-Za-z0-9._~+/=\-%:&]{8,}")
-_BOT_TOKEN = re.compile(r"(?<!\d)\d{6,12}:[A-Za-z0-9_-]{30,}(?![A-Za-z0-9_-])")   # и в пути /bot<токен>/
+_BOT_TOKEN = re.compile(r"(?<!\d)\d{1,12}:[A-Za-z0-9_-]{30,}(?![A-Za-z0-9_-])")   # и в пути /bot<токен>/; app_id бывает коротким
+_CHEQUE = re.compile(r"(?<![A-Za-z0-9_])(CQ|mc_)[A-Za-z0-9_-]{6,}")              # чеки CryptoBot/xRocket: кто знает код — забирает деньги
 _PARAM = re.compile(r"(?i)\b((?:tgWebAppData|initData|init_data|tg_init_data|webAppData)=)[^&\s\"'#<>]+")
 _SPAN = re.compile(r"[^\s\"'<>]+")
 _URL_IN_TEXT = re.compile(r"https?://[^\s\"'<>]+")
+_REL_URL = re.compile(r"^(?:[a-z][a-z0-9+.\-]*:)?[^\s?#]*[?#]\S*=\S*$", re.I)    # /путь?token=… или tg://…?startapp=…
+# Пара «ключ: значение» в обычном тексте (не JSON). Квантификатор ограничен ({0,40}?), иначе на длинных
+# base64/hex строках regex уходит в квадратичное время и морозит рекордер. Значение может начинаться со схемы.
 _KV_TEXT = re.compile(
-    r"(?i)([\"']?[a-z0-9_\-]*?(?:token|secret|password|passwd|api[_\-]?key|init[_\-]?data|session[_\-]?id|"
-    r"cookie|authorization|signature)[\"']?\s*[:=]\s*[\"']?)([^\"'&\s,;{}]{6,})")
+    r"(?i)([\"']?[a-z0-9_\-]{0,40}?(?:token|secret|password|passwd|api[_\-]?key|init[_\-]?data|session[_\-]?id|"
+    r"cookie|authorization|signature|токен|ключ)[\"']?\s*[:=]\s*[\"']?)"
+    r"((?:(?:bearer|basic|tma|token)\s+)?[^\"'&\s,;{}]{6,})")
 _CARD_FMT = re.compile(r"(?<!\d)\d{4}([ \-])\d{4}\1\d{4}\1\d{4}(?:\1\d{1,3})?(?!\d)")
 _CARD_RAW = re.compile(r"(?<!\d)\d{16,19}(?!\d)")
 _PHONE = re.compile(r"(?<![\w+])\+\d[\d \-()]{8,18}\d(?!\w)")
@@ -154,6 +159,7 @@ def _text_patterns(s):
     s = _JWT.sub("***jwt***", s)
     s = _AUTH_SCHEME.sub(lambda m: m.group(1) + " " + MASK, s)
     s = _BOT_TOKEN.sub("***bot_token***", s)
+    s = _CHEQUE.sub(lambda m: m.group(1) + MASK, s)
     s = _PARAM.sub(lambda m: m.group(1) + MASK, s)
     s = _SPAN.sub(_initdata_span, s)
     s = _CARD_FMT.sub(_mask_card_fmt, s)
@@ -166,6 +172,8 @@ def redact_str(s, aggressive=False):
         return s
     if re.match(r"^https?://\S+$", s):
         s = redact_url(s)
+    elif _REL_URL.match(s):
+        s = redact_url(s)           # относительная ссылка/редирект с секретом: /withdraw?token=…, #access_token=…
     else:
         s = _URL_IN_TEXT.sub(lambda m: redact_url(m.group(0)), s)
     s = _text_patterns(s)
@@ -179,7 +187,9 @@ def redact_text_kv(s):
     """Текст, который не разобрался как JSON (обрезанный ответ, SSE, form-data): ещё и пары ключ=значение."""
     if not isinstance(s, str) or not s:
         return s
-    return redact_str(_KV_TEXT.sub(lambda m: m.group(1) + MASK, s))
+    # Сначала redact_str (JWT, схемы Bearer/tma, токен бота, ссылки), потом пары ключ=значение по тому,
+    # что осталось. Обратный порядок съедал слово «Bearer» как значение и оставлял сам токен.
+    return _KV_TEXT.sub(lambda m: m.group(1) + MASK, redact_str(s))
 
 
 def redact_value(key, value, aggressive=False):
@@ -233,8 +243,8 @@ def redact_headers(headers, keep=None):
                 first, _, attrs = line.partition(";")
                 lines.append(first.split("=", 1)[0].strip() + "=" + MASK + (";" + attrs if attrs else ""))
             out[low] = "\n".join(lines)
-        elif key_rule(k) in ("strong", "suffix", "weak"):
-            out[low] = MASK
+        elif key_rule(k) in ("strong", "suffix", "weak") or any(p in k for p in ("auth", "session", "access")):
+            out[low] = MASK   # X-Auth / X-Session-Id / X-Access-… с непрозрачным значением
         else:
             out[low] = redact_str(value)
     return out
@@ -251,6 +261,6 @@ def redact_body(text, content_type=""):
             return redact_obj(json.loads(text)), None
         except ValueError:
             pass
-    if "x-www-form-urlencoded" in ct or re.fullmatch(r"[\w.\-%+]+=[^\s]*(&[\w.\-%+]+=[^\s]*)*", text.strip()):
+    if "x-www-form-urlencoded" in ct or re.fullmatch(r"[\w.\-%+]+=[^\s&]*(?:&[\w.\-%+]+=[^\s&]*)*", text.strip()):
         return None, redact_qs(text.strip())
     return None, redact_text_kv(text)

@@ -196,6 +196,11 @@
   var BAR_H = 64;
   var state = { main: {}, secondary: {}, back: false, settings: false, popup: null };
   var ui = {};
+  var memStore = {};   // эмулированные Device/SecureStorage держим в памяти, а не в localStorage (не оседают в профиле)
+  // Нажатия и ответы на вопросы: если приложение ещё не подписалось — теряем, как настоящий Android,
+  // а не доставляем через 2 секунды уже в другой экран (иначе одно нажатие срабатывает дважды).
+  var INPUT_EVENTS = { main_button_pressed: 1, secondary_button_pressed: 1, back_button_pressed: 1,
+    settings_button_pressed: 1, popup_closed: 1, invoice_closed: 1, scan_qr_popup_closed: 1, qr_text_received: 1 };
 
   function receiver() {
     return (window.Telegram && window.Telegram.WebView && window.Telegram.WebView.receiveEvent) ||
@@ -204,10 +209,12 @@
 
   function deliver(type, data, attempt) {
     // Ответы Telegram всегда асинхронны — приложение успевает подписаться на событие.
-    // Если SDK ещё грузится (например, resize до загрузки скриптов) — пробуем ещё 5 секунд.
+    // Если SDK ещё грузится (resize/тема до загрузки скриптов) — пробуем ещё 5 секунд, но только для
+    // событий-состояний; нажатия и ответы на вопросы не копим, иначе они «выстрелят» в поздний обработчик.
     setTimeout(function () {
       var f = receiver();
       if (typeof f !== 'function') {
+        if (INPUT_EVENTS[type]) { rec('shim_note', { dropped: type }); return; }
         if ((attempt || 0) < 50) deliver(type, data, (attempt || 0) + 1);
         else if (location.protocol !== 'about:') rec('shim_error', { where: 'deliver ' + type, error: 'у страницы нет SDK Telegram' });
         return;
@@ -218,8 +225,14 @@
 
   function barVisible() { return !!(state.main.is_visible || state.secondary.is_visible); }
 
+  function barHeight() {
+    if (!barVisible()) return 0;
+    try { return Math.ceil(ui.bar.getBoundingClientRect().height) || BAR_H; } catch (e) { return BAR_H; }
+  }
+
   function viewport() {
-    return { height: Math.max(100, window.innerHeight - (barVisible() ? BAR_H : 0)), width: window.innerWidth,
+    // реальная высота панели (при MainButton+SecondaryButton она выше 64), иначе 53px контента прячется под ней
+    return { height: Math.max(100, window.innerHeight - barHeight()), width: window.innerWidth,
       is_expanded: true, is_state_stable: true };
   }
 
@@ -265,8 +278,10 @@
     return el;
   }
 
+  function noFocus(btn) { btn.tabIndex = -1; return btn; }   // не держим фокус: иначе Enter/Пробел жмут кнопку повторно
+
   function ensureUI() {
-    if (host && host.isConnected) return true;
+    if (host && host.isConnected) { rehome(); return true; }
     var parent = document.documentElement;
     if (!parent) return false;
     host = document.createElement('autobid-tg-ui');
@@ -276,36 +291,61 @@
     ui.badge = make('div', 'badge', '● запись');
     ui.bar = make('div', 'bar');
     ui.tag = make('div', 'tag', CFG.label || 'Telegram (эмуляция)');
-    ui.main = make('button', 'tg-btn');
-    ui.second = make('button', 'tg-btn second');
+    ui.main = noFocus(make('button', 'tg-btn'));
+    ui.second = noFocus(make('button', 'tg-btn second'));
     ui.bar.appendChild(ui.tag);
     ui.bar.appendChild(ui.second);
     ui.bar.appendChild(ui.main);
-    ui.back = make('button', 'pill back', '‹ Назад');
-    ui.settings = make('button', 'pill settings', '⚙');
+    ui.back = noFocus(make('button', 'pill back', '‹ Назад'));
+    ui.settings = noFocus(make('button', 'pill settings', '⚙'));
     ui.toasts = make('div', 'toasts');
     [ui.badge, ui.bar, ui.back, ui.settings, ui.toasts].forEach(function (x) { root.appendChild(x); });
 
-    ui.main.addEventListener('click', function () {
+    ui.main.__act = function () {
       if (state.main.is_active === false) return;
       rec('tg_ui', { what: 'main_button', text: state.main.text || '' });
       deliver('main_button_pressed', null);
-    });
-    ui.second.addEventListener('click', function () {
+    };
+    ui.second.__act = function () {
       if (state.secondary.is_active === false) return;
       rec('tg_ui', { what: 'secondary_button', text: state.secondary.text || '' });
       deliver('secondary_button_pressed', null);
-    });
-    ui.back.addEventListener('click', function () {
+    };
+    ui.back.__act = function () {
       rec('tg_ui', { what: 'back_button', text: 'Назад' });
       deliver('back_button_pressed', null);
-    });
-    ui.settings.addEventListener('click', function () {
+    };
+    ui.settings.__act = function () {
       rec('tg_ui', { what: 'settings_button', text: 'Настройки' });
       deliver('settings_button_pressed', null);
-    });
+    };
     parent.appendChild(host);
+    rehome();
     return true;
+  }
+
+  function topModal() {
+    // верхний открытый модальный <dialog>: в нём всё вне диалога становится inert, в т.ч. наша панель
+    try {
+      var l = document.querySelectorAll('dialog[open]');
+      for (var i = l.length - 1; i >= 0; i--) { if (l[i].matches && l[i].matches(':modal')) return l[i]; }
+    } catch (e) { /* старый браузер без :modal */ }
+    return null;
+  }
+
+  function rehome() {
+    if (!host) return;
+    var target = topModal() || document.documentElement;
+    if (host.parentNode === target) return;
+    try {
+      if (host.__popover) { try { host.hidePopover(); } catch (e) { /* */ } host.removeAttribute('popover'); host.__popover = false; }
+      target.appendChild(host);
+      if (target !== document.documentElement && 'showPopover' in host) {
+        // popover выносит панель в top layer поверх диалога и держит её координаты относительно окна
+        host.setAttribute('popover', 'manual'); host.__popover = true;
+        try { host.showPopover(); } catch (e) { /* */ }
+      }
+    } catch (e) { /* */ }
   }
 
   function styleButton(btn, st) {
@@ -355,21 +395,20 @@
     var list = p.buttons && p.buttons.length ? p.buttons : [{ id: '', type: 'close' }];
     list.forEach(function (b) {
       var label = b.text || { ok: 'OK', close: 'Закрыть', cancel: 'Отмена' }[b.type] || 'OK';
-      var btn = make('button', 'pbtn' + (b.type === 'destructive' ? ' destructive' : ''), label);
-      btn.addEventListener('click', function () {
+      var btn = noFocus(make('button', 'pbtn' + (b.type === 'destructive' ? ' destructive' : ''), label));
+      btn.__act = function () {
         rec('tg_ui', { what: 'popup', button_id: b.id, text: label, title: p.title || '' });
         closePopup({ button_id: b.id });
-      });
+      };
       row.appendChild(btn);
     });
     card.appendChild(row);
     wrap.appendChild(card);
-    wrap.addEventListener('click', function (e) {
-      if (e.target === wrap) {
-        rec('tg_ui', { what: 'popup', button_id: null, text: '(закрыто без выбора)', title: p.title || '' });
-        closePopup({});
-      }
-    });
+    wrap.__act = function () {   // клик по затемнению (не по карточке) — закрытие без выбора
+      rec('tg_ui', { what: 'popup', button_id: null, text: '(закрыто без выбора)', title: p.title || '' });
+      closePopup({});
+    };
+    wrap.__wrapOnly = true;
     root.appendChild(wrap);
     state.popup = wrap;
   }
@@ -399,25 +438,22 @@
   function storage(method, p) {
     p = p || {};
     var secure = method.indexOf('secure') !== -1;
-    var prefix = secure ? '__autobid_ss__' : '__autobid_ds__';
+    var prefix = secure ? 'ss:' : 'ds:';          // храним в памяти (memStore), не в localStorage профиля
     var ev = secure ? 'secure_storage_' : 'device_storage_';
-    try {
-      if (/_save_key$/.test(method)) {
-        if (p.value === null || p.value === undefined) localStorage.removeItem(prefix + p.key);
-        else localStorage.setItem(prefix + p.key, String(p.value));
-        deliver(ev + 'key_saved', { req_id: p.req_id });
-      } else if (/_get_key$/.test(method)) {
-        var out = { req_id: p.req_id, value: localStorage.getItem(prefix + p.key) };
-        if (secure) out.can_restore = false;
-        deliver(ev + 'key_received', out);
-      } else if (/_clear$/.test(method)) {
-        Object.keys(localStorage).forEach(function (k) { if (k.indexOf(prefix) === 0) localStorage.removeItem(k); });
-        deliver(ev + 'cleared', { req_id: p.req_id });
-      } else {
-        deliver(ev + 'failed', { req_id: p.req_id, error: 'UNSUPPORTED' });
-      }
-    } catch (e) {
-      deliver(ev + 'failed', { req_id: p.req_id, error: String(e) });
+    var key = prefix + (p.key || '');
+    if (/_save_key$/.test(method)) {
+      if (p.value === null || p.value === undefined) delete memStore[key];
+      else memStore[key] = String(p.value);
+      deliver(ev + 'key_saved', { req_id: p.req_id });
+    } else if (/_get_key$/.test(method)) {
+      var out = { req_id: p.req_id, value: key in memStore ? memStore[key] : null };
+      if (secure) out.can_restore = false;
+      deliver(ev + 'key_received', out);
+    } else if (/_clear$/.test(method)) {
+      Object.keys(memStore).forEach(function (k) { if (k.indexOf(prefix) === 0) delete memStore[k]; });
+      deliver(ev + 'cleared', { req_id: p.req_id });
+    } else {
+      deliver(ev + 'failed', { req_id: p.req_id, error: 'UNSUPPORTED' });
     }
   }
 
@@ -494,7 +530,35 @@
     }
   };
 
+  // Наши кнопки — DOM-узлы в документе приложения, поэтому их клики доходят до его обработчиков
+  // (и закрывают его шторки/меню как «клик снаружи»), а фокус на кнопке ловит Enter/Пробел.
+  // Экранируем свои события в фазе перехвата: до приложения они не доходят, а действие кнопки
+  // выполняем сами. init-скрипт стоит раньше кода приложения, так что этот перехватчик — первый.
+  function ownAction(e) {
+    var path = e.composedPath ? e.composedPath() : [];
+    for (var i = 0; i < path.length; i++) {
+      if (path[i] === host) break;
+      if (path[i] && path[i].__act) return path[i];
+    }
+    return null;
+  }
+  ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'dblclick', 'auxclick', 'contextmenu',
+    'touchstart', 'touchend', 'focusin', 'focusout'].forEach(function (type) {
+    window.addEventListener(type, function (e) {
+      if (!isOurs(e)) return;
+      e.stopImmediatePropagation();
+      if (type === 'mousedown') { try { e.preventDefault(); } catch (_) { /* */ } }   // фокус остаётся в поле приложения
+      if (type === 'click') {
+        var el = ownAction(e);
+        if (el && el.__act && (!el.__wrapOnly || (e.composedPath && e.composedPath()[0] === el))) el.__act();
+      }
+    }, true);
+  });
+
   window.addEventListener('resize', sendViewport);
   document.addEventListener('DOMContentLoaded', render);
   setInterval(function () { if (host && !host.isConnected) render(); }, 1000);
+  try {
+    new MutationObserver(rehome).observe(document, { subtree: true, attributes: true, attributeFilter: ['open'] });
+  } catch (e) { /* без MutationObserver просто не переносим панель в модальный диалог */ }
 })();

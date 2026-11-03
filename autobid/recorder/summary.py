@@ -7,7 +7,7 @@ from urllib.parse import urlsplit
 
 from .common import human_size, read_events
 
-API_TYPES = {"xhr", "fetch", "eventsource", "other", "document"}
+API_TYPES = {"xhr", "fetch", "eventsource", "other", "document", "ping"}
 QUIET_TG = {"web_app_ready", "web_app_expand"}
 
 
@@ -87,6 +87,8 @@ def build_summary(events):
             lines.append(f"{t}  💬 окно браузера ({e.get('type')}): {e.get('message')}")
         elif k == "request" and e.get("type") in API_TYPES:
             r = responses.get(e["id"])
+            if r and r.get("saved") and e["method"] == "GET" and not e.get("body"):
+                continue   # это сохранённый файл приложения (скрипт/страница), а не запрос к API
             status = r.get("status") if r else ("ошибка: " + failed[e["id"]].get("failure", "")) if e["id"] in failed else "—"
             size = human_size(r.get("size")) if r and r.get("size") is not None else ""
             lines.append(f"{t}  → {e['method']:<6} {short_url(e['url'])}  [{status}] {size}")

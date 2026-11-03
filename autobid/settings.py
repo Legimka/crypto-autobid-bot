@@ -14,6 +14,7 @@ _DEFAULTS = {
     "MY_NICKNAME": "",
     "SESSIONS_DIR": "sessions",       # где лежат *.session; можно абсолютный путь вне проекта
     "RECORDINGS_DIR": "recordings",   # куда рекордеры пишут записи
+    "BROWSER_DIR": "",                # профиль браузера мини-приложений; пусто → <SESSIONS_DIR>/browser
     "PROXIES": {},                    # прокси по имени сессии: {"observer1": "socks5://..."}
     "OBSERVER_PROXIES": {},           # старое имя из cryptobot-p2p-bot, тоже учитывается
     "MARKETS": {},
@@ -58,6 +59,14 @@ def sessions_dir():
 
 def recordings_dir():
     return _path(get("RECORDINGS_DIR"))
+
+
+def browser_dir():
+    """Профиль браузера мини-приложений. В нём остаётся живой вход в приложение (initData, токены, cookies),
+    поэтому он не в recordings/ (её архивируют и шлют разработчику), а рядом с сессиями — их и так держат
+    вне общей папки (см. SESSIONS_DIR). Задать явно — BROWSER_DIR в config.py."""
+    custom = get("BROWSER_DIR")
+    return _path(custom) if custom else os.path.join(sessions_dir(), "browser")
 
 
 def require_api():

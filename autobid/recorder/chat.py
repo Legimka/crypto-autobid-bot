@@ -22,8 +22,13 @@ from telethon import errors, events, functions
 
 from .. import accounts, bots, redact, settings
 from . import buttons as B
-from .common import ConsoleLines, EventLog, make_recording_dir, utf8_console
+from .common import STOP_WORDS, ConsoleLines, EventLog, make_recording_dir, utf8_console
 from .launch import parse_direct_link
+
+
+def _red(s):
+    """Текст экрана/кнопки/копии: пары «ключ: значение» (токен: …), затем карты и телефоны."""
+    return redact.redact_str(redact.redact_text_kv(s), aggressive=True)
 
 HELP_INTERACTIVE = """\
 Команды (Enter после каждой):
@@ -49,17 +54,18 @@ def parse_command(line):
     if not s:
         return ("noop",)
     low = s.lower()
-    if low in ("!q", "!quit", "!exit", "!выход"):
+    if low in STOP_WORDS:          # q / й / стоп / stop / выход / exit (и с «!»). Отправить такое боту — через «> …»
         return ("quit",)
     if low in ("!s", "!screen", "!экран"):
         return ("screen",)
     if low in ("!h", "!help", "!помощь", "?"):
         return ("help",)
+    if s.startswith(">"):
+        rest = s[1:].strip()
+        return ("send", rest) if rest else ("noop",)
     m = re.fullmatch(r"(\d{1,3})(?:\s*@\s*(\d+))?", s)
     if m:
         return ("press", int(m.group(1)), int(m.group(2)) if m.group(2) else None)
-    if s.startswith(">"):
-        return ("send", s[1:].lstrip())
     return ("send", s)
 
 
@@ -90,20 +96,19 @@ def serialize(msg):
 def clean(m):
     """Скрыть секреты в тексте экрана; данные кнопок (data_hex) не трогаем — по ним потом нажимаем."""
     m = dict(m)
-    m["text"] = redact.redact_str(m["text"], aggressive=True)
-    m["links"] = [{"text": redact.redact_str(x["text"], aggressive=True), "url": redact.redact_url(x["url"])}
-                  for x in m["links"]]
+    m["text"] = _red(m["text"])
+    m["links"] = [{"text": _red(x["text"]), "url": redact.redact_url(x["url"])} for x in m["links"]]
     if m.get("markup") and m["markup"].get("rows"):
         rows = []
         for row in m["markup"]["rows"]:
             new_row = []
             for b in row:
                 b = dict(b)
-                b["text"] = redact.redact_str(b["text"], aggressive=True)
+                b["text"] = _red(b["text"])
                 if b.get("url"):
                     b["url"] = redact.redact_url(b["url"])
                 if b.get("copy_text"):
-                    b["copy_text"] = redact.redact_str(b["copy_text"], aggressive=True)
+                    b["copy_text"] = _red(b["copy_text"])
                 new_row.append(b)
             rows.append(new_row)
         m["markup"] = dict(m["markup"], rows=rows)
@@ -150,6 +155,8 @@ class ChatRecorder:
         self.txt = open(f"{out_dir}/chat.txt", "a", encoding="utf-8", buffering=1)
         self.screens = {}                  # id → последний вид сообщения (очищенный)
         self.current_id = None             # последний экран бота с кнопками
+        self.last_bot_id = None            # последнее сообщение бота (с кнопками или без — например, запрос ввода)
+        self.current_changed_at = 0.0      # когда текущий экран появился/сменился (monotonic)
         self.own_sent = set()              # id сообщений, отправленных отсюда (уже записаны)
         self.changed = asyncio.Event()     # бот что-то прислал или поменял
         self.account = account
@@ -174,8 +181,12 @@ class ChatRecorder:
         if kind == "edit" and old and content_key(old) == content_key(m):
             return None
         self.screens[m["id"]] = m
-        if not m["out"] and m["markup"] and m["markup"]["type"] in ("inline", "reply"):
-            self.current_id = m["id"]
+        if not m["out"]:
+            self.last_bot_id = m["id"]
+            if m["markup"] and m["markup"]["type"] in ("inline", "reply"):
+                if m["id"] != self.current_id or (old and content_key(old) != content_key(m)):
+                    self.current_changed_at = time.monotonic()   # экран с кнопками появился или поменялся
+                self.current_id = m["id"]
         if m["out"] and m["id"] in self.own_sent:
             return m   # уже записано как 'send'
         self.log.write("message", event=kind, msg=m)
@@ -215,6 +226,9 @@ class ChatRecorder:
 
         @self.client.on(events.MessageDeleted())
         async def on_deleted(event):
+            # Удаления в каналах/супергруппах нумеруются отдельно и могут совпасть с id экрана бота в личке.
+            if event.chat_id is not None:
+                return
             self.handle_deleted(event.deleted_ids or [])
 
         if history:
@@ -226,7 +240,17 @@ class ChatRecorder:
     def screen(self, msg_id=None):
         return self.screens.get(msg_id or self.current_id)
 
-    async def press(self, index, msg_id=None):
+    async def press(self, index, msg_id=None, typed_at=None):
+        if msg_id is None:
+            if typed_at is not None and self.current_changed_at > typed_at:
+                self.out(f"⚠ экран сменился уже после того, как ты набрал «{index}» — "
+                         f"посмотри новый экран (!s) и набери номер снова")
+                return False
+            if self.last_bot_id is not None and self.current_id is not None and self.last_bot_id != self.current_id:
+                self.out(f"⚠ последнее сообщение бота (#{self.last_bot_id}) просит ввод, а не кнопку.\n"
+                         f"   отправить «{index}» как текст — напиши: > {index}\n"
+                         f"   нажать [{index}] на прошлом экране #{self.current_id} — напиши: {index}@{self.current_id}")
+                return False
         m = self.screen(msg_id)
         if not m or not m["markup"] or m["markup"]["type"] not in ("inline", "reply"):
             self.out("⚠ нет экрана с кнопками" + (f" #{msg_id}" if msg_id else "") + " — дождись ответа бота или /start")
@@ -252,14 +276,15 @@ class ChatRecorder:
                 return False
             return await self._callback(m["id"], index, bytes.fromhex(b.get("data_hex", "")))
         if kind in ("webapp", "simple_webapp"):
-            self.out(f"⧉ «{b['text']}» открывает мини-приложение. Чтобы записать его:\n"
+            self.out(f"⧉ «{b['text']}» открывает мини-приложение. Сначала закончи эту запись (!q),\n"
+                     f"   потом в другом окне:\n"
                      f"   python record_webapp.py {self.session_name or '<сессия>'} {bots.slug(self.bot_username)} "
                      f"--button \"{b['text']}\"")
             return False
         if kind == "url":
             self.out(f"🔗 ссылка кнопки: {b.get('url')}")
             if parse_direct_link(b.get("url")):
-                self.out(f"⧉ это ссылка на мини-приложение. Чтобы записать его:\n"
+                self.out(f"⧉ это ссылка на мини-приложение. Сначала закончи эту запись (!q), потом в другом окне:\n"
                          f"   python record_webapp.py {self.session_name or '<сессия>'} "
                          f"{bots.slug(self.bot_username)} --button \"{b['text']}\"")
             return False
@@ -270,11 +295,16 @@ class ChatRecorder:
         return False
 
     async def _callback(self, msg_id, index, data):
+        # Одно нажатие = один запрос. По умолчанию Telethon на -503 Timeout повторяет запрос до 6 раз
+        # (бот получает 6 нажатий) и спит сквозь FLOOD_WAIT ≤60 с, пряча лимит. Отключаем это на время вызова.
+        cli = self.client
+        saved = (getattr(cli, "_request_retries", None), getattr(cli, "flood_sleep_threshold", None))
+        cli._request_retries, cli.flood_sleep_threshold = 0, 0
         try:
-            ans = await self.client(functions.messages.GetBotCallbackAnswerRequest(
+            ans = await cli(functions.messages.GetBotCallbackAnswerRequest(
                 peer=self.bot, msg_id=msg_id, data=data))
-        except errors.BotResponseTimeoutError:
-            self.log.write("callback_answer", msg_id=msg_id, index=index, timeout=True)
+        except (errors.BotResponseTimeoutError, errors.TimedOutError, errors.ServerError, ValueError) as e:
+            self.log.write("callback_answer", msg_id=msg_id, index=index, timeout=True, error=type(e).__name__)
             self.out("⌛ бот не подтвердил нажатие вовремя (экран при этом мог поменяться)")
             return True
         except errors.FloodWaitError as e:
@@ -289,6 +319,8 @@ class ChatRecorder:
             self.log.write("callback_answer", msg_id=msg_id, index=index, error=f"{type(e).__name__}: {e}")
             self.out(f"❌ Telegram ответил ошибкой: {type(e).__name__}: {e}")
             return False
+        finally:
+            cli._request_retries, cli.flood_sleep_threshold = saved
         answer = {"message": redact.redact_str(ans.message or "", aggressive=True) or None,
                   "alert": bool(ans.alert), "url": redact.redact_url(ans.url) if ans.url else None}
         self.log.write("callback_answer", msg_id=msg_id, index=index, answer=answer)
@@ -299,9 +331,25 @@ class ChatRecorder:
         return True
 
     async def send_text(self, text, via_button=None):
-        sent = await self.client.send_message(self.bot, text, parse_mode=None, link_preview=False)
-        self.own_sent.add(sent.id)
+        if not (text or "").strip():
+            self.out("⚠ пустое сообщение не отправляю (после > напиши текст)")
+            return False
         shown = redact.redact_str(text, aggressive=True)
+        try:
+            sent = await self.client.send_message(self.bot, text, parse_mode=None, link_preview=False)
+        except errors.FloodWaitError as e:
+            self.log.write("send_failed", text=shown, via_button=via_button, error=f"FLOOD_WAIT {e.seconds}")
+            self.out(f"⛔ Telegram просит подождать {e.seconds} с — сообщение не отправлено")
+            return False
+        except errors.YouBlockedUserError:
+            self.log.write("send_failed", text=shown, via_button=via_button, error="YouBlockedUser")
+            self.out("❌ бот заблокирован — разблокируй его в Telegram и попробуй снова")
+            return False
+        except (ValueError, errors.RPCError) as e:
+            self.log.write("send_failed", text=shown, via_button=via_button, error=f"{type(e).__name__}: {e}")
+            self.out(f"❌ сообщение не отправилось: {type(e).__name__} (запись продолжается)")
+            return False
+        self.own_sent.add(sent.id)
         self.log.write("send", msg_id=sent.id, text=shown, via_button=via_button)
         # Telethon мог уже показать это сообщение как событие (ответ на запрос тоже идёт в очередь событий)
         if sent.id not in self.screens:
@@ -309,7 +357,7 @@ class ChatRecorder:
             self.screens[sent.id] = clean(serialize(sent))
         return True
 
-    async def run_command(self, line):
+    async def run_command(self, line, typed_at=None):
         """Выполнить одну команду консоли. False — пора выходить."""
         cmd = parse_command(line)
         if cmd[0] == "quit":
@@ -320,7 +368,7 @@ class ChatRecorder:
             m = self.screen()
             self.out(render("ТЕКУЩИЙ ЭКРАН", m) if m else "⚠ экрана с кнопками пока нет")
         elif cmd[0] == "press":
-            await self.press(cmd[1], cmd[2])
+            await self.press(cmd[1], cmd[2], typed_at=typed_at)
         elif cmd[0] == "send":
             await self.send_text(cmd[1])
         return True
@@ -389,7 +437,7 @@ async def run(args):
                 rec.out(f"⏱ прошло {args.duration:.0f} с — заканчиваю")
                 break
             try:
-                line = await asyncio.wait_for(lines.get(), timeout)
+                line, typed_at = await asyncio.wait_for(lines.get_at(), timeout)
             except asyncio.TimeoutError:
                 continue
             if line is None:   # консоли нет (запуск без терминала): пишем дальше до --duration или Ctrl+C
@@ -399,10 +447,12 @@ async def run(args):
                     await asyncio.sleep(max(0.0, deadline - time.monotonic()))
                 break
             if args.interactive:
-                if not await rec.run_command(line):
+                if not await rec.run_command(line, typed_at=typed_at):
                     break
-            elif line.strip().lower() in ("q", "!q", "exit", "выход", "!выход"):
+            elif line.strip().lower() in STOP_WORDS:
                 break
+            elif line.strip():
+                rec.out("ℹ в этом режиме кнопки нажимаются в Telegram. Нажимать отсюда — запусти с -i. Закончить: q")
         return 0
     finally:
         if rec:
@@ -421,6 +471,12 @@ def main(argv=None):
         sys.exit(asyncio.run(run(args)) or 0)
     except KeyboardInterrupt:
         pass
-    except (settings.ConfigError, accounts.NotAuthorized) as e:
+    except (settings.ConfigError, accounts.NotAuthorized, accounts.SessionBusy) as e:
         print(f"❌ {e}")
+        sys.exit(1)
+    except errors.FloodWaitError as e:
+        print(f"❌ Telegram просит подождать {e.seconds} с — попробуй позже")
+        sys.exit(1)
+    except (ConnectionError, OSError):
+        print("❌ Нет связи с Telegram — проверь интернет и прокси в config.py")
         sys.exit(1)

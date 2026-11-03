@@ -140,6 +140,14 @@ async def test_list_options():
     assert labels == ["главное мини-приложение бота", "кнопка меню «Открыть»", "кнопка «Кошелёк»", "кнопка «🔄 Биржа»"]
 
 
+async def test_list_options_respects_no_start():
+    full = SimpleNamespace(full_user=SimpleNamespace(bot_info=None))
+    c = FakeClient([], full=full)                          # пустая история, кнопок нет
+    opts = await L.list_options(c, BOT, send_start=False)
+    assert c.sent == []                                    # /start не отправляли
+    assert opts[0][0] == "главное мини-приложение бота"
+
+
 def test_bot_aliases():
     assert bots.resolve("cryptobot") == "send" and bots.resolve("@CryptoBot") == "send"
     assert bots.resolve("https://t.me/xrocket?start=1") == "xrocket"
@@ -171,7 +179,7 @@ async def test_button_with_direct_link_opens_named_app():
     req = c.requests[-1]
     assert isinstance(req, functions.messages.RequestAppWebViewRequest)
     assert req.app.short_name == "exchange" and req.start_param == "a" and req.app.bot_id.user_id == 999
-    assert res.mode == "direct"
+    assert res.mode == "direct" and res.bot_username == "send" and res.bot is not None   # владелец для CloudStorage
 
 
 async def test_url_mode_with_main_app_direct_link():

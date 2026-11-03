@@ -10,6 +10,10 @@ from datetime import datetime
 
 from .. import redact, settings
 
+# Слова, которыми заканчивают запись. Едины для обоих рекордеров и обеих раскладок:
+# «й» — это «q» на русской раскладке, «стоп» — «stop».
+STOP_WORDS = {"q", "!q", "quit", "!quit", "exit", "!exit", "выход", "!выход", "стоп", "stop", "й", "!й"}
+
 
 def utf8_console():
     """Эмодзи и кириллица в консоли Windows (cp1251/cp866) без падений."""
@@ -93,11 +97,16 @@ class ConsoleLines:
             except (OSError, ValueError):
                 line = ""
             if line == "":   # stdin закрыт
-                self.loop.call_soon_threadsafe(self.queue.put_nowait, None)
+                self.loop.call_soon_threadsafe(self.queue.put_nowait, (None, time.monotonic()))
                 return
-            self.loop.call_soon_threadsafe(self.queue.put_nowait, line.rstrip("\r\n"))
+            self.loop.call_soon_threadsafe(self.queue.put_nowait, (line.rstrip("\r\n"), time.monotonic()))
 
     async def get(self):
+        line, _ = await self.queue.get()
+        return line
+
+    async def get_at(self):
+        """(строка|None, когда введена). Время — чтобы не нажать по экрану, который уже сменился после ввода."""
         return await self.queue.get()
 
 

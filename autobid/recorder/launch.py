@@ -43,6 +43,8 @@ class Launch:
     title: str = ""
     query_id: Optional[int] = None
     button: Optional[dict] = field(default=None)
+    bot: Optional[object] = None          # бот-владелец приложения: у прямой ссылки он может быть не текущим
+    bot_username: Optional[str] = None
 
 
 def theme_json():
@@ -72,6 +74,10 @@ def normalize_launch_url(url, platform=DEFAULT_PLATFORM, version=DEFAULT_VERSION
 
 _DIRECT = re.compile(r"^(?:https?://)?(?:t\.me|telegram\.me)/(?P<bot>[A-Za-z][A-Za-z0-9_]{3,})"
                      r"(?:/(?P<app>[A-Za-z0-9_]+))?/?(?:\?(?P<q>[^#]*))?$", re.I)
+# Служебные пути t.me — это не боты с мини-приложениями (t.me/share/url, t.me/joinchat/… и т.п.)
+_RESERVED = {"share", "addstickers", "addemoji", "addtheme", "addlist", "joinchat", "boost", "invoice",
+             "giftcode", "setlanguage", "login", "proxy", "socks", "contact", "confirmphone", "bg", "iv", "nft",
+             "c", "s", "a", "m", "k"}
 
 
 def parse_direct_link(url):
@@ -80,11 +86,12 @@ def parse_direct_link(url):
     url = (url or "").strip()
     if url.lower().startswith("tg://resolve?"):
         q = dict(parse_qsl(url.split("?", 1)[1], keep_blank_values=True))
-        if q.get("domain") and (q.get("appname") or "startapp" in q):
-            return {"bot": q["domain"], "app": q.get("appname") or None, "start_param": q.get("startapp") or None}
+        dom = q.get("domain")
+        if dom and dom.lower() not in _RESERVED and (q.get("appname") or "startapp" in q):
+            return {"bot": dom, "app": q.get("appname") or None, "start_param": q.get("startapp") or None}
         return None
     m = _DIRECT.match(url)
-    if not m:
+    if not m or m.group("bot").lower() in _RESERVED:
         return None
     q = dict(parse_qsl(m.group("q") or "", keep_blank_values=True))
     app = m.group("app")
@@ -126,15 +133,22 @@ async def find_webapp_buttons(client, bot, limit=30):
 
 async def _launch_direct(client, link, platform, title, button=None):
     """Открыть мини-приложение по прямой ссылке (её бот может отличаться от текущего)."""
-    peer = await client.get_input_entity(link["bot"])
-    if link["app"]:
-        res = await client(functions.messages.RequestAppWebViewRequest(
-            peer=peer, app=types.InputBotAppShortName(bot_id=utils.get_input_user(peer), short_name=link["app"]),
-            platform=platform, start_param=link["start_param"], theme_params=theme_json()))
-    else:
-        res = await client(functions.messages.RequestMainWebViewRequest(
-            peer=peer, bot=peer, platform=platform, start_param=link["start_param"], theme_params=theme_json()))
-    return Launch(res.url, "direct", title, getattr(res, "query_id", None), button)
+    try:
+        peer = await client.get_input_entity(link["bot"])
+    except (ValueError, errors.RPCError) as e:
+        raise LaunchError(f"по ссылке не нашёл бота @{link['bot']}") from e
+    try:
+        if link["app"]:
+            res = await client(functions.messages.RequestAppWebViewRequest(
+                peer=peer, app=types.InputBotAppShortName(bot_id=utils.get_input_user(peer), short_name=link["app"]),
+                platform=platform, start_param=link["start_param"], theme_params=theme_json()))
+        else:
+            res = await client(functions.messages.RequestMainWebViewRequest(
+                peer=peer, bot=peer, platform=platform, start_param=link["start_param"], theme_params=theme_json()))
+    except TypeError as e:            # ссылка ведёт на канал или чат, а не на бота
+        raise LaunchError(f"по ссылке @{link['bot']} это не бот") from e
+    return Launch(res.url, "direct", title, getattr(res, "query_id", None), button,
+                  bot=peer, bot_username=link["bot"])
 
 
 async def send_start_and_wait(client, bot, timeout=15.0):
