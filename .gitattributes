@@ -1,0 +1,5 @@
+# cmd.exe надёжно читает .bat только с переводами строк Windows
+*.bat text eol=crlf
+*.py text eol=lf
+*.js text eol=lf
+*.md text eol=lf

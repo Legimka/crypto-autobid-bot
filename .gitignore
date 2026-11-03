@@ -1,0 +1,25 @@
+# входы в аккаунты Telegram — дают полный доступ к аккаунту
+*.session
+*.session-journal
+sessions/
+
+# личные настройки: API_ID/API_HASH, токены
+config.py
+
+# записи рекордеров и профиль браузера: балансы, заявки, cookies входа в мини-приложения
+recordings/
+login_qr.html
+flow_log.txt
+
+# состояние старого бота сигналов (legacy/)
+notify_chat*.json
+settings.json
+vol_mem.json
+limits_stats.json
+*.log
+*.log.old
+
+__pycache__/
+.pytest_cache/
+.venv/
+venv/

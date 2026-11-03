@@ -1,0 +1,5 @@
+telethon>=1.37
+aiohttp>=3.9
+aiohttp-socks>=0.8
+qrcode>=7.4
+playwright>=1.45
