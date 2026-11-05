@@ -16,7 +16,8 @@ _DEFAULTS = {
     "RECORDINGS_DIR": "recordings",   # куда рекордеры пишут записи
     "PROXIES": {},                    # прокси по имени сессии: {"observer1": "socks5://..."}
     "OBSERVER_PROXIES": {},           # старое имя из cryptobot-p2p-bot, тоже учитывается
-    "MARKETS": {},
+    "MARKETS": {},                    # рынки P2P (перебивка): см. config.example.py
+    "EXCHANGE": {},                   # рынки биржи (перебивка): см. config.example.py
 }
 
 
