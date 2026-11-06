@@ -17,7 +17,10 @@ _DEFAULTS = {
     "PROXIES": {},                    # прокси по имени сессии: {"observer1": "socks5://..."}
     "OBSERVER_PROXIES": {},           # старое имя из cryptobot-p2p-bot, тоже учитывается
     "MARKETS": {},                    # рынки P2P (перебивка): см. config.example.py
-    "EXCHANGE": {},                   # рынки биржи (перебивка): см. config.example.py
+    "EXCHANGE": {},                   # рынки биржи CryptoBot (перебивка): см. config.example.py
+    "XROCKET_TOKEN": "",              # токен Exchange API xRocket (только testnet для разработки!)
+    "XROCKET_TESTNET": True,          # True — testnet (безопасно), False — боевой счёт
+    "XROCKET_MARKETS": {},            # рынки биржи xRocket (перебивка): см. config.example.py
     "LOGS_DIR": "logs",               # куда писать логи (autobid.log) и журнал смен курса (trades.jsonl)
     "STATE_DIR": "state",             # состояние между перезапусками (cooldown, последние курсы)
     "LOG_LEVEL": "INFO",              # DEBUG / INFO / WARNING

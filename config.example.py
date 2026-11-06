@@ -74,5 +74,24 @@ EXCHANGE = {
     #              "mode": "Buy", "sell_limit": "3.80", "amount": "", "poll_sec": 10},
 }
 
+# ============================================================================
+#  БИРЖА xRocket (официальный Exchange API: REST + WebSocket, есть testnet)
+# ============================================================================
+# Токен: в боте → Menu → Settings → Exchange settings → API token.
+#   ВАЖНО: токен даёт ПОЛНЫЙ доступ к счёту (торговля, переводы, вывод) и его нельзя ограничить.
+#   Для разработки бери ТОЛЬКО тестовый токен из @xrocket_testnet_bot и держи XROCKET_TESTNET = True.
+#   Боевой токен (@xRocket) вставляй, только когда всё проверено на testnet.
+XROCKET_TOKEN = ""
+XROCKET_TESTNET = True        # True — тестовая сеть (@xrocket_testnet_bot), False — боевой счёт
+
+# Рынки биржи xRocket для перебивки (модуль autobid/xrocket). Пара — "BASE-QUOTE" (через дефис).
+# Поля те же, что у EXCHANGE/MARKETS: side ("buy"/"sell"), step, initial+max_dev_pct, on_limit,
+# min_price/max_price, max_jump, cooldown_*, stability_polls, poll_sec, enabled, amount/size.
+XROCKET_MARKETS = {
+    # "TON-USDT": {"side": "buy", "step": "0.0001", "initial": "2.10", "max_dev_pct": 2,
+    #              "on_limit": "reset", "size": "5", "poll_sec": 3},
+}
+
 # Запуск после настройки:  python run.py  (всё) | python run.py p2p | python run.py exchange
+# Проверка связи с xRocket:  python check_xrocket.py
 # Логи — в logs/ (autobid.log и trades.jsonl — журнал смен курса). См. LOGS_DIR/STATE_DIR ниже при желании.
