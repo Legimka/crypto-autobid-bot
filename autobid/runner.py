@@ -205,7 +205,7 @@ def _make_factory(key, cfg, kind, log):
 
     async def make():
         if kind == "p2p":
-            return await p2p_mod.build(key, cfg, log=to_log)
+            return await p2p_mod.build(key, cfg, log=to_log, trade_log=trade_log)
         if kind == "xrocket":
             return await xrocket_mod.build(key, cfg, log=to_log, trade_log=trade_log)
         return await exchange_mod.build(key, cfg, log=to_log)

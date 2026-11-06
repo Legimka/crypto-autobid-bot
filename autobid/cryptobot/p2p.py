@@ -223,6 +223,16 @@ class P2POutbidder:
                 changed += 1
         return changed
 
+    async def _sleep(self, sec, stop_event):
+        """Пауза, прерываемая остановкой, — чтобы рынок быстро реагировал на Ctrl+C/аварийный стоп."""
+        if stop_event is None:
+            await asyncio.sleep(sec)
+            return
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=sec)
+        except asyncio.TimeoutError:
+            pass
+
     async def run(self, stop_event=None):
         self.log(f"[{self.key}] перебивка запущена: {self.asset}/{self.fiat} {self.side}, "
                  f"опрос каждые {self.poll:.0f} с, режим смены курса — {self.trader_mode}")
@@ -231,7 +241,7 @@ class P2POutbidder:
                 await self.step_once()
             except Exception as e:
                 self.log(f"[{self.key}] ошибка прохода: {type(e).__name__}: {str(e)[:200]}")
-            await asyncio.sleep(self.poll)
+            await self._sleep(self.poll, stop_event)
 
 
 def _split_pair(key):
@@ -240,7 +250,7 @@ def _split_pair(key):
     return asset.strip().upper(), fiat.strip().upper()
 
 
-async def build(market_key, cfg, log=print):
+async def build(market_key, cfg, log=print, trade_log=None):
     """Собрать P2POutbidder из конфига рынка: поднять клиентов наблюдателя и перебивающего."""
     asset, fiat = _split_pair(market_key)
     cfg = dict(cfg)
@@ -265,4 +275,4 @@ async def build(market_key, cfg, log=print):
         else:
             trader_tg = await accounts.connect_authorized(trader_session)
             trader = CryptoBotApp(trader_tg, BOT, proxy=accounts.proxy_url(trader_session))
-    return P2POutbidder(market_key, cfg, observer, trader=trader, chat=chat, log=log)
+    return P2POutbidder(market_key, cfg, observer, trader=trader, chat=chat, log=log, trade_log=trade_log)
