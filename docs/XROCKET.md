@@ -64,6 +64,10 @@ rejected/expired. Числа — строки.
   далее пуши `{"method":"subscription","params":{...,"data":{"snapshot":bool,"sequence","bids","asks"}}}`.
   `snapshot=false` — дельта; размер `0` на уровне = уровень убрать; после реконнекта брать новый снимок.
 - Ордера на WS не выставляются — только через REST.
+- **Реализовано:** `autobid/xrocket/ws.py` — `OrderBookStream` (публичный `orderbook`): снимок + дельты,
+  size 0 = убрать уровень, ping 30 с, реконнект с новым снимком. Трейдер берёт стакан из WS при
+  `use_ws: True` в рынке и откатывается на REST, пока поток не готов. Проверено на testnet: снимок WS
+  совпал с REST, дельты и `sequence` приходят, сортировка «лучшие сверху» верна.
 
 ## Ошибки и лимиты
 
@@ -75,9 +79,12 @@ rejected/expired. Числа — строки.
 
 ## Проверить на testnet перед боем
 
-1. Точные query-параметры `GET /orderbook` и форма ответа.
-2. Обязательные/необязательные поля лимитного ордера (`size` vs `funds` vs `price`) и форма ответа POST /orders.
-3. Где `orderId` у `DELETE /order` — в query или в теле.
-4. Форма ответа балансов.
-5. Реальные лимиты частоты.
+1. ✅ Точные query-параметры `GET /orderbook` и форма ответа (REST отдаёт обе стороны по возрастанию —
+   лучший бид последний; `parse_orderbook` сортирует).
+2. ✅ Поля лимитного ордера и форма ответа POST /orders (201, объект ордера с `id`, `status:"working"`, `clientOrderId`).
+3. ✅ `DELETE /order` — `orderId`/`clientOrderId` в query; ответ `{"cancelledOrderIds":[..]}`.
+4. ✅ Форма ответа балансов: `{"balances":[{asset,balance,available,holds}]}`.
+5. Реальные лимиты частоты (пока без цифр — на 429 ждём `Retry-After`).
+   Прочее подтверждено на testnet: `clientOrderId` нельзя повторять даже после отмены (ставим уникальный);
+   WebSocket-стакан совпадает с REST.
 6. Эндпоинт перевода Funding↔Trading (в доке `exchange-transfer-controller-transfer`, путь не зафиксирован).

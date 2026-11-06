@@ -21,6 +21,7 @@ from .. import settings
 from ..cryptobot import outbid as O
 from . import logic
 from .api import AuthError, RateLimited, XRocketError, XRocketExchange
+from .ws import OrderBookStream
 
 CLIENT_PREFIX = "autobid"      # префикс clientOrderId, чтобы узнавать свои ордера и делать повторы идемпотентными
 TERMINAL_STATUS = {"completed", "cancelled", "rejected", "expired"}
@@ -77,6 +78,8 @@ class XRocketTrader:
         self.poll = float(cfg.get("poll_sec", 3))
         self.depth = int(cfg.get("depth", 20))
         self.precision = cfg.get("precision")
+        self.use_ws = bool(cfg.get("use_ws"))
+        self.feed = None               # OrderBookStream, если use_ws — живой стакан по WebSocket
         self.api = api
         self.log = log
         self.trade_log = trade_log
@@ -107,11 +110,17 @@ class XRocketTrader:
         data = await self.api.active_orders()
         return my_order_for(_as_list(data, "orders", "data", "result"), self.sym, self.side, CLIENT_PREFIX)
 
+    async def _orderbook(self):
+        """Стакан из WebSocket-потока, если он готов, иначе REST (откат при обрыве WS)."""
+        if self.feed is not None and self.feed.ready:
+            return self.feed.book()
+        return await self.api.orderbook(self.sym, depth=self.depth, precision=self.precision)
+
     async def step_once(self):
         if self._paused():
             return "pause"
         mine = await self._my_order()
-        ob = await self.api.orderbook(self.sym, depth=self.depth, precision=self.precision)
+        ob = await self._orderbook()
         my_price = mine.get("price") if mine else None
         my_size = _remaining(mine) if mine else None
 
@@ -171,9 +180,34 @@ class XRocketTrader:
         except asyncio.TimeoutError:
             pass
 
+    async def _start_feed(self, stop_event):
+        """Поднять WebSocket-поток стакана и подождать первый снимок (до ~5 с); при неудаче
+        молча работаем на REST — step_once сам возьмёт стакан по REST, пока feed не готов."""
+        self.feed = OrderBookStream(self.sym, testnet=bool(settings.get("XROCKET_TESTNET")),
+                                    depth=self.depth, precision=self.precision, log=self.log)
+        task = asyncio.ensure_future(self.feed.run(stop_event))
+        try:
+            await asyncio.wait_for(self.feed._ready.wait(), timeout=5)
+            self.log(f"[{self.key}] WebSocket-стакан подключён")
+        except asyncio.TimeoutError:
+            self.log(f"[{self.key}] WebSocket пока без снимка — работаю на REST, поток продолжит попытки")
+        return task
+
     async def run(self, stop_event=None):
         self.log(f"[{self.key}] xRocket запущена: {self.sym} {self.side}, шаг {self.step}, "
-                 f"опрос каждые {self.poll:.0f} с")
+                 f"опрос каждые {self.poll:.0f} с{' (WebSocket)' if self.use_ws else ''}")
+        feed_task = await self._start_feed(stop_event) if self.use_ws else None
+        try:
+            await self._loop(stop_event)
+        finally:
+            if feed_task is not None:
+                feed_task.cancel()
+                try:
+                    await feed_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+    async def _loop(self, stop_event):
         errors = 0
         while stop_event is None or not stop_event.is_set():
             extra = 0

@@ -86,10 +86,14 @@ XROCKET_TESTNET = True        # True — тестовая сеть (@xrocket_tes
 
 # Рынки биржи xRocket для перебивки (модуль autobid/xrocket). Пара — "BASE-QUOTE" (через дефис).
 # Поля те же, что у EXCHANGE/MARKETS: side ("buy"/"sell"), step, initial+max_dev_pct, on_limit,
-# min_price/max_price, max_jump, cooldown_*, stability_polls, poll_sec, enabled, amount/size.
+# min_price/max_price, max_jump, max_changes, stability_polls, min_interval_sec, poll_sec, enabled,
+# size (объём своего ордера). Плюс:
+#   use_ws — True: брать стакан по WebSocket (быстрая реакция, ТЗ §7); при обрыве бот сам
+#            откатывается на REST-опрос. False/нет — только REST каждые poll_sec.
+#   depth / precision — глубина и округление стакана (по умолчанию depth 20).
 XROCKET_MARKETS = {
     # "TON-USDT": {"side": "buy", "step": "0.0001", "initial": "2.10", "max_dev_pct": 2,
-    #              "on_limit": "reset", "size": "5", "poll_sec": 3},
+    #              "on_limit": "reset", "size": "5", "use_ws": True, "poll_sec": 3},
 }
 
 # Уведомления в Telegram о важных событиях (необязательно): запуск/остановка, падение рынка,
