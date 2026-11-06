@@ -3,3 +3,4 @@ aiohttp>=3.9
 aiohttp-socks>=0.8
 qrcode>=7.4
 playwright>=1.45
+websockets>=12.0   # потоки стакана/ордеров xRocket Exchange (WebSocket)
