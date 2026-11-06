@@ -57,45 +57,109 @@ def allowed_jump(jump, max_jump):
     return max_jump is None or to_dec(jump) <= to_dec(max_jump)
 
 
-def fixed_target(my_price, enemy_price, asc, step=None, initial=None, max_dev_pct=None):
-    """Куда переставить фиксированную цену, чтобы встать на шаг выше enemy.
+def corridor_bound(initial, max_dev_pct, asc, step):
+    """Край коридора на стороне движения: самая агрессивная цена, ещё НЕ выходящая за ±max_dev_pct
+    от исходного курса. asc=True (перебиваем вниз) → нижняя граница, округлённая ВВЕРХ к сетке
+    (чтобы остаться внутри коридора); asc=False (вверх) → верхняя граница, округлённая ВНИЗ."""
+    st, init, dev = to_dec(step), to_dec(initial), to_dec(max_dev_pct) / 100
+    if asc:
+        return ((init * (1 - dev)) / st).to_integral_value(rounding=ROUND_CEILING) * st
+    return ((init * (1 + dev)) / st).to_integral_value(rounding=ROUND_FLOOR) * st
+
+
+def clamp_price(value, step, min_price=None, max_price=None):
+    """Загнать курс в [min_price, max_price] (абсолютные пределы из ТЗ §4), округляя к сетке так,
+    чтобы остаться внутри: снизу — вверх, сверху — вниз. None-предел не ограничивает."""
+    st, value = to_dec(step), to_dec(value)
+    if min_price is not None and value < to_dec(min_price):
+        value = (to_dec(min_price) / st).to_integral_value(rounding=ROUND_CEILING) * st
+    if max_price is not None and value > to_dec(max_price):
+        value = (to_dec(max_price) / st).to_integral_value(rounding=ROUND_FLOOR) * st
+    return value
+
+
+def fixed_target(my_price, enemy_price, asc, step=None, initial=None, max_dev_pct=None,
+                 on_limit="reset", min_price=None, max_price=None):
+    """Куда переставить фиксированную цену, чтобы встать на шаг выше enemy, с ограничителями.
     Возвращает {value: Decimal, jump: Decimal(%), reset: bool} или None, если результат ≤ 0.
-    reset=True — встать выше конкурента значит выйти за коридор, поэтому вернулись к исходному курсу."""
+
+    on_limit — что делать, когда перебить = выйти за коридор ±max_dev_pct от исходного курса:
+      'reset' — вернуться к исходному курсу initial (как в тексте ТЗ);
+      'hold'  — встать на край коридора (самая агрессивная цена внутри предела, место держим дольше).
+    В обоих случаях reset=True (признак «упёрлись в край коридора»).
+    min_price/max_price — абсолютные пределы курса (ТЗ §4), применяются всегда."""
     st = step_for(my_price, step)
     target = beat(enemy_price, st, asc).quantize(st)
     reset = False
     if initial and max_dev_pct and not within_corridor(target, initial, max_dev_pct):
-        target = to_dec(initial).quantize(st)      # на границе коридора — назад к исходному курсу
+        if on_limit == "hold":
+            target = corridor_bound(initial, max_dev_pct, asc, st).quantize(st)
+        else:
+            target = to_dec(initial).quantize(st)   # на границе коридора — назад к исходному курсу
         reset = True
+    target = clamp_price(target, st, min_price, max_price).quantize(st)
     if target <= 0:
         return None
     return {"value": target, "jump": jump_pct(my_price, target), "reset": reset}
 
 
-def floating_target(my_ratio, enemy_ratio, asc, pct_step="0.01", initial_ratio=None, max_dev_pp=None):
+def floating_target(my_ratio, enemy_ratio, asc, pct_step="0.01", initial_ratio=None, max_dev_pp=None,
+                    on_limit="reset"):
     """Плавающая цена: ratio — процент от биржевого курса (94.3 = -5.7%). Встать на шаг лучше enemy_ratio.
-    max_dev_pp — коридор в пунктах ratio. Возвращает {ratio, margin (ratio-100), jump (п.п.), reset}."""
+    max_dev_pp — коридор в пунктах ratio. on_limit как у fixed_target: 'reset' — назад к initial_ratio,
+    'hold' — встать на край коридора. Возвращает {ratio, margin (ratio-100), jump (п.п.), reset}."""
     st = to_dec(pct_step)
     ratio = beat(to_dec(enemy_ratio), st, asc)
     reset = False
     if initial_ratio and max_dev_pp and abs(ratio - to_dec(initial_ratio)) > to_dec(max_dev_pp):
-        ratio = to_dec(initial_ratio)
+        edge = to_dec(initial_ratio) + (to_dec(max_dev_pp) if not asc else -to_dec(max_dev_pp))
+        ratio = edge if on_limit == "hold" else to_dec(initial_ratio)
         reset = True
     return {"ratio": ratio, "margin": ratio - 100, "jump": abs(ratio - to_dec(my_ratio)), "reset": reset}
 
 
-def exchange_target(enemy_price, step, side, limit=None):
+def exchange_target(enemy_price, step, side, limit=None, min_price=None, max_price=None):
     """Биржа (как в old_bot_p2p): встать на шаг «лучше» конкурента.
     side='buy'  — выше (enemy + step), не выше коридора limit;
     side='sell' — ниже (enemy - step), не ниже коридора limit.
-    Возвращает Decimal или None, если результат выходит за коридор limit."""
+    min_price/max_price — абсолютные пределы (ТЗ §4). Возвращает Decimal или None, если результат
+    выходит за коридор limit или за пределы min/max."""
     enemy, st = to_dec(enemy_price), to_dec(step)
     if side == "buy":
         target = enemy + st
         if limit is not None and target >= to_dec(limit):   # old_bot: price + step < limit
             return None
-        return target
-    target = enemy - st
-    if limit is not None and target <= to_dec(limit):        # old_bot: price - step > limit
+    else:
+        target = enemy - st
+        if limit is not None and target <= to_dec(limit):    # old_bot: price - step > limit
+            return None
+    if min_price is not None and target < to_dec(min_price):
+        return None
+    if max_price is not None and target > to_dec(max_price):
         return None
     return target
+
+
+class StabilityGuard:
+    """Защита от «дёрганья» (ТЗ §7): конкурента учитываем, только если его цена держится
+    не меньше `need` опросов подряд. Чистая логика без времени — считаем по проходам.
+
+    confirm(key, price) → True, когда по этому ключу (например, лидеру лимитки) цена `price`
+    наблюдается уже need-й раз подряд. Сменилась цена или лидер — счётчик начинается заново."""
+
+    def __init__(self, need=2):
+        self.need = max(1, int(need))
+        self._seen = {}   # key -> [last_price_str, count]
+
+    def confirm(self, key, price):
+        p = str(price)
+        prev = self._seen.get(key)
+        count = prev[1] + 1 if prev and prev[0] == p else 1
+        self._seen[key] = [p, count]
+        return count >= self.need
+
+    def reset(self, key=None):
+        if key is None:
+            self._seen.clear()
+        else:
+            self._seen.pop(key, None)

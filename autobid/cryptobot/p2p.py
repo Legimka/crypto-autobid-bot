@@ -60,7 +60,7 @@ class P2POutbidder:
     """Одна пара (рынок). observer — CryptoBotApp для чтения стакана; для смены курса либо trader
     (CryptoBotApp того же/другого аккаунта), либо chat (ChatTrader)."""
 
-    def __init__(self, market_key, cfg, observer, trader=None, chat=None, log=print):
+    def __init__(self, market_key, cfg, observer, trader=None, chat=None, log=print, trade_log=None):
         self.key = market_key
         self.cfg = cfg
         self.asset = cfg["asset"]
@@ -74,7 +74,11 @@ class P2POutbidder:
         self.max_dev_pp = cfg.get("max_dev_pp")     # коридор плавающей цены, п.п. ratio
         self.initial = cfg.get("initial")           # исходный курс (фикс)
         self.initial_ratio = cfg.get("initial_ratio")
+        self.on_limit = cfg.get("on_limit", "reset")       # у края коридора: 'reset' / 'hold'
+        self.min_price = cfg.get("min_price")              # абсолютные пределы курса (ТЗ §4)
+        self.max_price = cfg.get("max_price")
         self.max_jump = cfg.get("max_jump", 5)      # не прыгать больше: % (фикс) / п.п. (плав)
+        self.max_changes = cfg.get("max_changes")          # ТЗ §4: предел числа перебиваний объявления
         self.poll = float(cfg.get("poll_sec", 6))
         self.max_pages = int(cfg.get("max_pages", 5))
         self.trader_mode = cfg.get("trader_mode", "app")   # 'app' | 'chat'
@@ -82,7 +86,10 @@ class P2POutbidder:
         self.trader = trader
         self.chat = chat
         self.log = log
+        self.trade_log = trade_log                         # журнал смен курса (logging_setup.TradeLog)
         self.cooldown = CooldownGuard(int(cfg.get("cooldown_changes", 5)), float(cfg.get("cooldown_min", 11)))
+        self.stability = O.StabilityGuard(int(cfg.get("stability_polls", 2)))   # ТЗ §7: анти-«дёрганье»
+        self._changes = {}                                 # offer_id -> сколько раз уже перебили
         self._names = None
         self._my_names = set()
 
@@ -118,11 +125,12 @@ class P2POutbidder:
             leader = enemies[0]
             if self.floating:
                 t = O.floating_target(me.get("ratio") or 0, leader.get("ratio") or 0, self.asc,
-                                      self.pct_step, self.initial_ratio, self.max_dev_pp)
+                                      self.pct_step, self.initial_ratio, self.max_dev_pp, self.on_limit)
                 value, show = format_margin(t["margin"]), f"{format_margin(t['margin'])}%"
                 same = abs(t["ratio"] - O.to_dec(me.get("ratio") or 0)) < O.to_dec(self.pct_step) / 2
             else:
-                t = O.fixed_target(me["p"], leader["p"], self.asc, self.step, self.initial, self.max_dev)
+                t = O.fixed_target(me["p"], leader["p"], self.asc, self.step, self.initial, self.max_dev,
+                                   self.on_limit, self.min_price, self.max_price)
                 if not t:
                     continue
                 value = show = str(t["value"])
@@ -138,6 +146,9 @@ class P2POutbidder:
         me = p["offer"]
         oid = me["id"]
         unit = "п.п." if p["floating"] else "%"
+        if self.max_changes is not None and self._changes.get(oid, 0) >= int(self.max_changes):
+            self.log(f"[{self.key}] #O{oid}: достигнут предел перебиваний ({self.max_changes}) — больше не меняю")
+            return False
         if not p["reset"] and not O.allowed_jump(p["jump"], self.max_jump):
             self.log(f"[{self.key}] #O{oid}: скачок {p['jump']:.2f}{unit} > лимита {self.max_jump}{unit} — "
                      f"не меняю (аномалия в стакане?). Поменял бы на {p['show']}")
@@ -160,8 +171,16 @@ class P2POutbidder:
             self.log(f"[{self.key}] #O{oid}: не поменял курс — {type(e).__name__}: {str(e)[:200]}")
             return False
         self.cooldown.record(oid)
-        tail = " (возврат к исходному — край коридора)" if p["reset"] else f" (выше был {p['leader']['n']} {p['leader']['p']})"
+        self._changes[oid] = self._changes.get(oid, 0) + 1
+        edge = "hold" if (p["reset"] and self.on_limit == "hold") else ("reset" if p["reset"] else None)
+        tail = (" (край коридора — встал на границу)" if edge == "hold"
+                else " (возврат к исходному — край коридора)" if edge == "reset"
+                else f" (выше был {p['leader']['n']} {p['leader']['p']})")
         self.log(f"[{self.key}] #O{oid}: курс {me['p']} → {p['show']}{tail}")
+        if self.trade_log is not None:
+            self.trade_log.record(market=self.key, offer=oid, side=self.side,
+                                  old=str(me["p"]), new=str(p["value"]), floating=p["floating"],
+                                  edge=edge, leader=p["leader"].get("n"), changes=self._changes[oid])
         return True
 
     async def step_once(self):
@@ -171,6 +190,12 @@ class P2POutbidder:
         my_ids = await self._my_ids()
         changed = 0
         for p in self.plan(book, my_ids):
+            # Анти-«дёрганье» (ТЗ §7): перебиваем лидера, только если его курс держится несколько
+            # опросов подряд. Возврат к исходному (reset) делаем сразу — это не гонка за конкурентом.
+            lead = p["leader"]
+            lead_price = lead.get("ratio") if p["floating"] else lead.get("p")
+            if not p["reset"] and not self.stability.confirm((p["offer"]["id"], lead.get("id")), lead_price):
+                continue
             if await self.apply(p, my_ids):
                 changed += 1
         return changed

@@ -11,12 +11,15 @@
 
 | Путь | Что это |
 |---|---|
+| `run.py` | запуск автоперебивки 24/7: `python run.py [p2p\|exchange]` |
 | `qr_login.py` | вход в аккаунт Telegram по QR → `sessions/<имя>.session` |
 | `check_app.py` | проверка: вход в мини-приложение CryptoBot и чтение стаканов P2P |
-| `autobid/cryptobot/` | клиент внутреннего API мини-приложения CryptoBot и смена курса через чат (из старого бота) |
+| `autobid/cryptobot/` | перебивка P2P (API мини-приложения) и биржи (кнопки в чате), общая математика |
+| `autobid/runner.py` | оркестратор: поднимает все рынки, изоляция ошибок, перезапуск, мягкая остановка |
+| `autobid/logging_setup.py`, `state.py` | логи и журнал смен курса; состояние между перезапусками |
 | `autobid/accounts.py` | аккаунты Telegram (Telethon), прокси |
 | `legacy/` | старый бот сигналов как справка для переноса логики (отсюда не запускается) |
-| `docs/` | [доступы](docs/ACCESS.md), [ТЗ](docs/TZ.md), [решения](docs/DECISIONS.md) |
+| `docs/` | [модули](docs/MODULES.md), [доступы](docs/ACCESS.md), [ТЗ](docs/TZ.md), [решения](docs/DECISIONS.md) |
 
 ## Быстрый старт (Windows)
 

@@ -11,6 +11,11 @@ recordings/
 login_qr.html
 flow_log.txt
 
+# логи и состояние нового бота
+logs/
+state/
+trades.jsonl
+
 # состояние старого бота сигналов (legacy/)
 notify_chat*.json
 settings.json

@@ -18,6 +18,9 @@ _DEFAULTS = {
     "OBSERVER_PROXIES": {},           # старое имя из cryptobot-p2p-bot, тоже учитывается
     "MARKETS": {},                    # рынки P2P (перебивка): см. config.example.py
     "EXCHANGE": {},                   # рынки биржи (перебивка): см. config.example.py
+    "LOGS_DIR": "logs",               # куда писать логи (autobid.log) и журнал смен курса (trades.jsonl)
+    "STATE_DIR": "state",             # состояние между перезапусками (cooldown, последние курсы)
+    "LOG_LEVEL": "INFO",              # DEBUG / INFO / WARNING
 }
 
 
@@ -59,6 +62,14 @@ def sessions_dir():
 
 def recordings_dir():
     return _path(get("RECORDINGS_DIR"))
+
+
+def logs_dir():
+    return _path(get("LOGS_DIR"))
+
+
+def state_dir():
+    return _path(get("STATE_DIR"))
 
 
 def require_api():

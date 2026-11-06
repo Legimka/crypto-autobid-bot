@@ -140,3 +140,53 @@ def test_cooldown_guard():
     g.record("O1", now=0); g.record("O1", now=1)
     assert not g.allow("O1", now=2)                        # исчерпал лимит, пауза ещё идёт
     assert g.allow("O1", now=0 + 10 * 60 + 2)              # пауза прошла
+
+
+# ------------------------------------------------------------------ край коридора и пределы
+def test_corridor_bound():
+    # buy (вниз): нижняя граница ±1% от 100 → 99, округление вверх к сетке (внутри коридора)
+    assert O.corridor_bound("100", "1", asc=True, step="0.01") == Decimal("99.00")
+    # sell (вверх): верхняя граница → 101, округление вниз
+    assert O.corridor_bound("100", "1", asc=False, step="0.01") == Decimal("101.00")
+
+
+def test_clamp_price():
+    assert O.clamp_price("98", "0.01", min_price="99", max_price="110") == Decimal("99.00")
+    assert O.clamp_price("115", "0.01", min_price="99", max_price="110") == Decimal("110.00")
+    assert O.clamp_price("105", "0.01", min_price="99", max_price="110") == Decimal("105.00")
+
+
+def test_fixed_target_hold_at_border():
+    # перебить = уйти за коридор ±0.5% от 101; on_limit='hold' → встать на край, а не к исходному
+    t = O.fixed_target("100.2", "100", asc=True, step="0.01",
+                       initial="101", max_dev_pct="0.5", on_limit="hold")
+    assert t["reset"] and t["value"] == Decimal("100.50")      # 101*(1-0.005)=100.495 → вверх 100.50
+
+
+def test_fixed_target_absolute_bounds():
+    # цель 99.99, но min_price 100.20 → подтянуть к нижнему пределу
+    t = O.fixed_target("101", "100", asc=True, step="0.01", min_price="100.20")
+    assert t["value"] == Decimal("100.20")
+
+
+def test_floating_target_hold_at_border():
+    # плавающая, buy (вниз): коридор 2 п.п. от 95 → край 93; 'hold' встаёт на 93, не на 95
+    t = O.floating_target("94", "92", asc=True, pct_step="0.01",
+                          initial_ratio="95", max_dev_pp="2", on_limit="hold")
+    assert t["reset"] and t["ratio"] == Decimal("93")
+
+
+def test_exchange_target_absolute_bounds():
+    assert O.exchange_target("100", "0.01", "buy", limit="110", max_price="100.005") is None
+    assert O.exchange_target("100", "0.01", "sell", limit="90", min_price="99.995") is None
+
+
+# ------------------------------------------------------------------ защита от «дёрганья»
+def test_stability_guard():
+    g = O.StabilityGuard(need=2)
+    assert not g.confirm("O1", "100")          # первый раз видим — ждём
+    assert g.confirm("O1", "100")              # держится второй опрос — реагируем
+    assert not g.confirm("O1", "101")          # цена сменилась — счётчик заново
+    assert g.confirm("O1", "101")
+    g2 = O.StabilityGuard(need=1)
+    assert g2.confirm("x", "5")                # need=1 — реагируем сразу (защита выключена)

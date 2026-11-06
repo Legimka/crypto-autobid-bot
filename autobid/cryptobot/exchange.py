@@ -53,7 +53,7 @@ def first_num(line):
     return Decimal(m.group(0).replace(",", "")) if m else None
 
 
-def decide(lines, side, limit, step, difference=None):
+def decide(lines, side, limit, step, difference=None, min_price=None, max_price=None):
     """Чистое решение по стакану (перенос do_after_delay из refreshExchangeNew).
 
     lines — тексты кнопок-ордеров сверху вниз; ордера этой стороны помечены 🟢 (buy) / 🔴 (sell),
@@ -72,17 +72,17 @@ def decide(lines, side, limit, step, difference=None):
         if price is None:
             continue
         if MINE in line:                               # первый в коридоре — мой: я лучший
-            if O.exchange_target(price, step, side, limit) is None:
+            if O.exchange_target(price, step, side, limit, min_price, max_price) is None:
                 continue                               # мой за коридором — ищем, кого перебить ниже
             if difference in (None, ""):
                 return {"action": "hold"}
             nxt = next((first_num(book[j]) for j in range(idx + 1, len(book)) if MINE not in book[j]), None)
             if nxt is not None and abs(price - nxt) > O.to_dec(difference):
-                target = O.exchange_target(nxt, step, side, limit)
+                target = O.exchange_target(nxt, step, side, limit, min_price, max_price)
                 if target is not None:
                     return {"action": "replace", "value": target}
             return {"action": "hold"}
-        target = O.exchange_target(price, step, side, limit)   # первый в коридоре — чужой: перебиваем
+        target = O.exchange_target(price, step, side, limit, min_price, max_price)   # чужой — перебиваем
         if target is None:
             continue
         return {"action": "replace" if mine_present else "place", "value": target}
@@ -93,7 +93,7 @@ class ExchangeTrader:
     """Одна пара на бирже CryptoBot. cfg: pair, limit, step, amount, mode('Buy'/'Sell'), sell_limit,
     difference, poll_sec (см. config.example.py)."""
 
-    def __init__(self, tg_client, cfg, log=print):
+    def __init__(self, tg_client, cfg, log=print, trade_log=None):
         self.tg = tg_client
         self.cfg = dict(cfg)
         self.pair = cfg["pair"]
@@ -103,8 +103,11 @@ class ExchangeTrader:
         self.mode = cfg.get("mode", "Buy")          # 'Buy' / 'Sell'
         self.sell_limit = cfg.get("sell_limit")
         self.difference = cfg.get("difference")
+        self.min_price = cfg.get("min_price")       # абсолютные пределы курса (ТЗ §4)
+        self.max_price = cfg.get("max_price")
         self.poll = float(cfg.get("poll_sec", 10))
         self.log = log
+        self.trade_log = trade_log
         self._filled = asyncio.Event()
         self._last_fill = None
 
@@ -186,14 +189,21 @@ class ExchangeTrader:
     async def step_once(self):
         await self._open()
         lines = await self._stack()
-        d = decide(lines, self.side, self.limit, self.step, self.difference)
+        d = decide(lines, self.side, self.limit, self.step, self.difference, self.min_price, self.max_price)
         if d["action"] == "place":
             self.log(f"[{self.pair}] выставляю {self.mode} по {d['value']}")
             await self._place(d["value"])
+            self._record(d)
         elif d["action"] == "replace":
             self.log(f"[{self.pair}] переставляю {self.mode} на {d['value']}")
             await self._replace(d["value"])
+            self._record(d)
         return d["action"]
+
+    def _record(self, d):
+        if self.trade_log is not None:
+            self.trade_log.record(market=f"EX {self.pair}", side=self.side,
+                                  action=d["action"], new=str(d["value"]), mode=self.mode)
 
     def _on_fill(self):
         from telethon import events
