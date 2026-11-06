@@ -1,5 +1,5 @@
 """Оркестратор и обвязка: проверка конфига, флаг вкл/выкл, состояние — без сети и Telegram."""
-from autobid import runner, state
+from autobid import notify, runner, state
 
 
 # ------------------------------------------------------------------ флаг включения рынка
@@ -55,3 +55,29 @@ def test_state_store_roundtrip(tmp_path, monkeypatch):
     s.update("obj", y=3)
     s2 = state.Store("t")                                    # перечитали с диска
     assert s2.get("a") == 1 and s2.get("obj") == {"x": 2, "y": 3}
+
+
+# ------------------------------------------------------------------ аварийный стоп-файл
+def test_stop_flag_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner.settings, "state_dir", lambda: str(tmp_path))
+    import os
+    assert not os.path.exists(runner.stop_file_path())
+    path = runner.raise_stop_flag()
+    assert os.path.exists(path)
+    runner._clear_stop_flag()
+    assert not os.path.exists(runner.stop_file_path())
+
+
+# ------------------------------------------------------------------ уведомитель
+def test_notifier_build_null_when_unconfigured(monkeypatch):
+    monkeypatch.setattr(notify.settings, "get",
+                        lambda k: "" if k in ("NOTIFY_BOT_TOKEN", "NOTIFY_CHAT_ID") else None)
+    n = notify.build()
+    assert isinstance(n, notify.NullNotifier) and n.enabled is False
+
+
+def test_notifier_build_real_when_configured(monkeypatch):
+    vals = {"NOTIFY_BOT_TOKEN": "123:abc", "NOTIFY_CHAT_ID": "42"}
+    monkeypatch.setattr(notify.settings, "get", lambda k: vals.get(k, ""))
+    n = notify.build()
+    assert isinstance(n, notify.Notifier) and n.chat_id == "42"

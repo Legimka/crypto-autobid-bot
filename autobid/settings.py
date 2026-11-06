@@ -24,6 +24,8 @@ _DEFAULTS = {
     "LOGS_DIR": "logs",               # куда писать логи (autobid.log) и журнал смен курса (trades.jsonl)
     "STATE_DIR": "state",             # состояние между перезапусками (cooldown, последние курсы)
     "LOG_LEVEL": "INFO",              # DEBUG / INFO / WARNING
+    "NOTIFY_BOT_TOKEN": "",           # токен Telegram-бота для уведомлений о важных событиях (необязательно)
+    "NOTIFY_CHAT_ID": "",             # id чата/пользователя, куда слать уведомления
 }
 
 

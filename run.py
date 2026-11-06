@@ -6,6 +6,7 @@
     python run.py p2p        только P2P CryptoBot
     python run.py exchange   только биржа CryptoBot
     python run.py xrocket    только биржа xRocket
+    python run.py stop       аварийный стоп работающего бота (из другого терминала)
 
 Ctrl+C — мягкая остановка.
 Перед первым запуском: install.bat, затем заполни config.py и войди в аккаунт(ы):
@@ -24,8 +25,13 @@ def main():
         if arg in ("-h", "--help", "help"):
             print(__doc__)
             return
+        if arg == "stop":
+            from autobid import runner
+            path = runner.raise_stop_flag()
+            print(f"Аварийный стоп: создан файл {path}. Работающий бот остановится в течение нескольких секунд.")
+            return
         if arg not in MODES:
-            print(f"Неизвестный режим: {sys.argv[1]!r}. Допустимо: {', '.join(MODES)}.")
+            print(f"Неизвестный режим: {sys.argv[1]!r}. Допустимо: {', '.join(MODES)}, stop.")
             print(__doc__)
             sys.exit(2)
         which = arg

@@ -92,6 +92,13 @@ XROCKET_MARKETS = {
     #              "on_limit": "reset", "size": "5", "poll_sec": 3},
 }
 
-# Запуск после настройки:  python run.py  (всё) | python run.py p2p | python run.py exchange
+# Уведомления в Telegram о важных событиях (необязательно): запуск/остановка, падение рынка,
+# неверный токен, аварийный стоп. Заведи бота у @BotFather, возьми токен; NOTIFY_CHAT_ID — твой id
+# (узнать можно у @userinfobot). Если не заполнять — уведомлений просто не будет.
+NOTIFY_BOT_TOKEN = ""
+NOTIFY_CHAT_ID = ""
+
+# Запуск после настройки:  python run.py  (всё) | python run.py p2p | exchange | xrocket
+# Аварийный стоп работающего бота:  python run.py stop   (или создать файл state/STOP)
 # Проверка связи с xRocket:  python check_xrocket.py
 # Логи — в logs/ (autobid.log и trades.jsonl — журнал смен курса). См. LOGS_DIR/STATE_DIR ниже при желании.

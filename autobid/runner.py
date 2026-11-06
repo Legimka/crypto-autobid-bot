@@ -13,15 +13,17 @@
 Ctrl+C — мягкая остановка: задачам выставляется stop, они выходят из цикла.
 """
 import asyncio
+import os
 import random
 
-from . import logging_setup, settings
+from . import logging_setup, notify, settings
 from .cryptobot import exchange as exchange_mod
 from .cryptobot import p2p as p2p_mod
 from .xrocket import trader as xrocket_mod
 
 BACKOFF_START = 10
 BACKOFF_MAX = 120
+STOP_FILE = "STOP"          # аварийный стоп: создать файл state/STOP → мягкая остановка всех рынков
 
 
 def _enabled(cfg):
@@ -115,6 +117,39 @@ async def _sleep_or_stop(sec, stop):
         pass
 
 
+def stop_file_path():
+    return os.path.join(settings.state_dir(), STOP_FILE)
+
+
+def raise_stop_flag():
+    """Создать файл аварийного стопа (для `python run.py stop` из другого терминала)."""
+    path = stop_file_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("stop\n")
+    return path
+
+
+def _clear_stop_flag():
+    try:
+        os.remove(stop_file_path())
+    except OSError:
+        pass
+
+
+async def _watch_stop_file(stop, log, notifier):
+    """Следить за файлом state/STOP: появился → мягкая остановка всех рынков (ТЗ §7, аварийный стоп)."""
+    path = stop_file_path()
+    while not stop.is_set():
+        if os.path.exists(path):
+            log.warning("Найден файл аварийного стопа %s — останавливаю торговлю.", path)
+            await notifier.send("⛔ Аварийный стоп: получен сигнал остановки, торговля останавливается.")
+            stop.set()
+            _clear_stop_flag()
+            return
+        await _sleep_or_stop(2, stop)
+
+
 async def _close(trader):
     """Закрыть http-сессии клиентов рынка, если они есть (у P2P — observer/trader)."""
     for attr in ("observer", "trader", "api"):
@@ -126,7 +161,7 @@ async def _close(trader):
                 pass
 
 
-async def _supervise(label, make, stop, log):
+async def _supervise(label, make, stop, log, notifier):
     """Держать один рынок живым: построить → run → при ошибке перезапустить с паузой."""
     await _sleep_or_stop(random.uniform(0, 3), stop)     # разнести старты рынков
     delay = BACKOFF_START
@@ -137,6 +172,7 @@ async def _supervise(label, make, stop, log):
         except Exception as e:
             log.error("[%s] не удалось запустить: %s: %s — повтор через %d с",
                       label, type(e).__name__, str(e)[:200], delay)
+            await notifier.send(f"⚠️ [{label}] не запустился: {type(e).__name__}: {str(e)[:150]}")
             await _sleep_or_stop(delay, stop)
             delay = min(delay * 2, BACKOFF_MAX)
             continue
@@ -148,6 +184,7 @@ async def _supervise(label, make, stop, log):
         except Exception as e:
             log.error("[%s] упал: %s: %s — перезапуск через %d с",
                       label, type(e).__name__, str(e)[:200], delay)
+            await notifier.send(f"⚠️ [{label}] упал ({type(e).__name__}), перезапуск через {delay} с")
             await _sleep_or_stop(delay, stop)
             delay = min(delay * 2, BACKOFF_MAX)
         finally:
@@ -174,6 +211,7 @@ def _make_factory(key, cfg, kind, log):
 async def run_all(which="all", stop=None, log=None):
     log = log or logging_setup.setup()
     stop = stop or asyncio.Event()
+    notifier = notify.build()
 
     jobs = _jobs(which)
     if not jobs:
@@ -181,6 +219,7 @@ async def run_all(which="all", stop=None, log=None):
                     "(и что у рынка не стоит \"enabled\": False).", which)
         return
 
+    _clear_stop_flag()                       # убрать старый флаг, чтобы не остановиться сразу
     tasks, started = [], []
     validators = {"p2p": validate_p2p, "exchange": validate_exchange, "xrocket": validate_xrocket}
     for label, key, cfg, kind in jobs:
@@ -189,20 +228,29 @@ async def run_all(which="all", stop=None, log=None):
             log.error("[%s] пропущен — проблемы в настройках: %s", label, "; ".join(problems))
             continue
         tasks.append(asyncio.create_task(
-            _supervise(label, _make_factory(key, cfg, kind, log), stop, log), name=label))
+            _supervise(label, _make_factory(key, cfg, kind, log), stop, log, notifier), name=label))
         started.append(label)
 
     if not tasks:
         log.error("Все рынки отсеяны проверкой настроек — запускать нечего.")
         return
 
-    log.info("Запущено рынков: %d (%s). Остановка — Ctrl+C.", len(started), ", ".join(started))
+    watcher = asyncio.create_task(_watch_stop_file(stop, log, notifier), name="stop-watch")
+    log.info("Запущено рынков: %d (%s). Остановка — Ctrl+C или `python run.py stop`.",
+             len(started), ", ".join(started))
+    await notifier.send(f"▶️ Бот запущен. Рынков: {len(started)} ({', '.join(started)}).")
     try:
         await asyncio.gather(*tasks)
     except asyncio.CancelledError:
         stop.set()
         await asyncio.gather(*tasks, return_exceptions=True)
         raise
+    finally:
+        stop.set()                           # остановить задачу-наблюдатель
+        watcher.cancel()
+        await asyncio.gather(watcher, return_exceptions=True)
+        await notifier.send("⏹️ Бот остановлен.")
+        await notifier.close()
 
 
 async def main(which="all"):
