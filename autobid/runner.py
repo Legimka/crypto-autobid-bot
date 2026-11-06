@@ -76,7 +76,12 @@ def validate_xrocket(key, cfg):
         problems.append(f"side должен быть 'buy' или 'sell', а не {cfg.get('side')!r}")
     if cfg.get("on_limit") not in (None, "reset", "hold", "pause"):
         problems.append(f"on_limit должен быть 'reset', 'hold' или 'pause', а не {cfg.get('on_limit')!r}")
-    if cfg.get("initial") and not cfg.get("max_dev_pct"):
+    mode = str(cfg.get("corridor_mode", "fixed")).lower()
+    if mode not in ("fixed", "floating"):
+        problems.append(f"corridor_mode должен быть 'fixed' или 'floating', а не {cfg.get('corridor_mode')!r}")
+    if mode == "floating" and not cfg.get("max_dev_pct"):
+        problems.append("corridor_mode='floating' требует max_dev_pct (ширину коридора от рыночного курса)")
+    elif mode == "fixed" and cfg.get("initial") and not cfg.get("max_dev_pct"):
         problems.append("задан initial, но нет max_dev_pct (коридор не ограничен)")
     _check_bounds(cfg, problems)
     return problems

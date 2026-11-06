@@ -67,6 +67,16 @@ def corridor_bound(initial, max_dev_pct, asc, step):
     return ((init * (1 + dev)) / st).to_integral_value(rounding=ROUND_FLOOR) * st
 
 
+def mid_price(best_bid, best_ask):
+    """Опора плавающего коридора — «биржевой курс» (ТЗ §6): середина спреда (best_bid+best_ask)/2.
+    Если одна сторона пуста — берём доступную; если стакан пуст — None."""
+    b = to_dec(best_bid) if best_bid is not None else None
+    a = to_dec(best_ask) if best_ask is not None else None
+    if b is not None and a is not None:
+        return (b + a) / 2
+    return b if b is not None else a
+
+
 def clamp_price(value, step, min_price=None, max_price=None):
     """Загнать курс в [min_price, max_price] (абсолютные пределы из ТЗ §4), округляя к сетке так,
     чтобы остаться внутри: снизу — вверх, сверху — вниз. None-предел не ограничивает."""
@@ -138,6 +148,30 @@ def exchange_target(enemy_price, step, side, limit=None, min_price=None, max_pri
     if max_price is not None and target > to_dec(max_price):
         return None
     return target
+
+
+class AnchorSmoother:
+    """Сглаживание опоры плавающего коридора (EMA), чтобы центр не дёргался от одной чужой заявки
+    (ТЗ §7, «стабильность важнее скорости»). alpha в (0,1]: 1 — без сглаживания (сырой mid), меньше —
+    плавнее и инертнее. None-значение update() игнорируется (пустой стакан), опора не меняется."""
+
+    def __init__(self, alpha=1.0):
+        self.alpha = to_dec(alpha)
+        self._v = None
+
+    def update(self, value):
+        if value is None:
+            return self._v
+        v = to_dec(value)
+        self._v = v if self._v is None else self._v + self.alpha * (v - self._v)
+        return self._v
+
+    @property
+    def value(self):
+        return self._v
+
+    def reset(self):
+        self._v = None
 
 
 class StabilityGuard:

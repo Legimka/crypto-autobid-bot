@@ -68,6 +68,10 @@ class XRocketTrader:
         self.size = str(cfg.get("size") or cfg.get("amount") or "").strip()
         self.initial = cfg.get("initial")
         self.max_dev = cfg.get("max_dev_pct")
+        self.corridor_mode = str(cfg.get("corridor_mode", "fixed")).lower()
+        # плавающий коридор (ТЗ §6): опора — живой рыночный курс (середина спреда), не фиксированный initial.
+        _alpha = cfg.get("anchor_ema")
+        self.anchor = O.AnchorSmoother(_alpha) if (self.corridor_mode == "floating" and _alpha) else None
         self.on_limit = cfg.get("on_limit", "reset")
         self.limit_pause = float(cfg.get("limit_pause_sec", 30))
         self.min_price = cfg.get("min_price")
@@ -124,8 +128,19 @@ class XRocketTrader:
         my_price = mine.get("price") if mine else None
         my_size = _remaining(mine) if mine else None
 
+        corridor_initial = self.initial
+        if self.corridor_mode == "floating":                 # опора коридора = живой рыночный курс (ТЗ §6)
+            best_bid = ob["bids"][0][0] if ob["bids"] else None
+            best_ask = ob["asks"][0][0] if ob["asks"] else None
+            ref = O.mid_price(best_bid, best_ask)
+            if self.anchor is not None:
+                ref = self.anchor.update(ref)                # сглаживание опоры, чтобы центр не дёргался
+            if ref is None:
+                return "noanchor"                            # пустой стакан — опоры нет, ждём
+            corridor_initial = (O.to_dec(ref) / self.step).to_integral_value() * self.step  # на сетку шага
+
         d = logic.decide(ob["bids"], ob["asks"], self.side, self.step, my_price, my_size,
-                         self.initial, self.max_dev, self.on_limit, self.min_price, self.max_price)
+                         corridor_initial, self.max_dev, self.on_limit, self.min_price, self.max_price)
         act = d["action"]
         if act in ("hold", "none"):
             return act
@@ -163,7 +178,8 @@ class XRocketTrader:
         self._last_change = now
         if d["reset"] and self.on_limit == "reset":
             self._pause()                                     # вернулись к началу → небольшая пауза (ТЗ п.3)
-        tail = " (край коридора — возврат к начальному)" if d["reset"] else ""
+        back = "рыночному курсу" if self.corridor_mode == "floating" else "начальному"
+        tail = f" (край коридора — возврат к {back})" if d["reset"] else ""
         self.log(f"[{self.key}] {self.side} ордер → {d['price']}{tail}")
         if self.trade_log is not None:
             self.trade_log.record(market=f"XR {self.key}", side=self.side, action=act,

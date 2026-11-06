@@ -117,3 +117,60 @@ def test_decide_buy_corridor_hold_at_border():
                  step="0.01", initial="1.05", max_dev_pct="1", on_limit="hold")
     # потолок коридора 1.05*1.01=1.0605 → вниз к сетке 1.06
     assert d["reset"] and d["price"] == D("1.06")
+
+
+# ------------------------------------------------------------------ плавающий коридор в трейдере
+import asyncio
+
+from autobid.xrocket import trader as T
+
+
+class _FakeApi:
+    """Подставной API: отдаёт заданный стакан, нет своих ордеров, запоминает выставленные."""
+    def __init__(self, bids, asks):
+        self._ob = {"bids": bids, "asks": asks, "sequence": 1}
+        self.placed = []
+        self.cancelled = []
+
+    async def active_orders(self):
+        return {"orders": []}
+
+    async def orderbook(self, sym, depth=20, precision=None):
+        return self._ob
+
+    async def place_limit(self, sym, side, price, size, client_id=None):
+        self.placed.append((side, D(str(price)), size))
+        return {"id": "1", "status": "working", "clientOrderId": client_id}
+
+    async def cancel(self, order_id=None, client_id=None):
+        self.cancelled.append(order_id or client_id)
+        return {"cancelledOrderIds": [order_id]}
+
+
+def _mk(cfg, api):
+    return T.XRocketTrader("GRAM-USDT", dict(cfg, symbol="GRAM-USDT"), api, log=lambda *a: None)
+
+
+def test_trader_floating_anchor_is_mid_grid():
+    # buy; конкурент 1.07, best ask 1.09 → mid=1.08; коридор ±1% от 1.08 → перебить до 1.08 внутри него
+    api = _FakeApi(_bids((1.07, 5),), _bids((1.09, 2),))
+    t = _mk({"side": "buy", "step": "0.01", "size": "1", "stability_polls": 1,
+             "corridor_mode": "floating", "max_dev_pct": "1"}, api)
+    act = asyncio.run(t.step_once())
+    assert act == "place" and api.placed[-1][1] == D("1.08")
+
+
+def test_trader_floating_resets_to_mid_when_outside():
+    # buy; конкурент 1.07, best ask 1.50 → mid=1.285→сетка 1.28; перебив 1.08 вне коридора ±1% → reset к 1.28
+    api = _FakeApi(_bids((1.07, 5),), _bids((1.50, 2),))
+    t = _mk({"side": "buy", "step": "0.01", "size": "1",
+             "corridor_mode": "floating", "max_dev_pct": "1", "on_limit": "reset"}, api)
+    act = asyncio.run(t.step_once())
+    assert act == "place" and api.placed[-1][1] == D("1.28")    # на сетке шага, не 1.285
+
+
+def test_trader_floating_no_anchor_on_empty_book():
+    api = _FakeApi([], [])
+    t = _mk({"side": "buy", "step": "0.01", "size": "1",
+             "corridor_mode": "floating", "max_dev_pct": "1"}, api)
+    assert asyncio.run(t.step_once()) == "noanchor" and api.placed == []

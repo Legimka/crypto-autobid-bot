@@ -192,6 +192,27 @@ def test_exchange_target_absolute_bounds():
     assert O.exchange_target("100", "0.01", "sell", limit="90", min_price="99.995") is None
 
 
+# ------------------------------------------------------------------ плавающий коридор (опора = рынок)
+def test_mid_price():
+    assert O.mid_price("1.10", "1.12") == Decimal("1.11")       # середина спреда
+    assert O.mid_price("1.10", None) == Decimal("1.10")         # одна сторона — берём её
+    assert O.mid_price(None, "1.12") == Decimal("1.12")
+    assert O.mid_price(None, None) is None                      # пустой стакан — опоры нет
+
+
+def test_anchor_smoother_raw_and_ema():
+    raw = O.AnchorSmoother(1.0)                                 # alpha=1 → без сглаживания
+    assert raw.update("1.00") == Decimal("1.00")
+    assert raw.update("2.00") == Decimal("2.00")
+    raw.update(None)                                           # пустой стакан не двигает опору
+    assert raw.value == Decimal("2.00")
+
+    ema = O.AnchorSmoother("0.5")                               # инерция: шаг на половину расстояния
+    assert ema.update("1.00") == Decimal("1.00")               # первое значение — как есть
+    assert ema.update("2.00") == Decimal("1.5")                # 1.0 + 0.5*(2.0-1.0)
+    assert ema.update("2.00") == Decimal("1.75")               # 1.5 + 0.5*(2.0-1.5)
+
+
 # ------------------------------------------------------------------ защита от «дёрганья»
 def test_stability_guard():
     g = O.StabilityGuard(need=2)

@@ -88,12 +88,29 @@ XROCKET_TESTNET = True        # True — тестовая сеть (@xrocket_tes
 # Поля те же, что у EXCHANGE/MARKETS: side ("buy"/"sell"), step, initial+max_dev_pct, on_limit,
 # min_price/max_price, max_jump, max_changes, stability_polls, min_interval_sec, poll_sec, enabled,
 # size (объём своего ордера). Плюс:
+#   corridor_mode — "fixed" (по умолчанию): центр коридора = initial (фиксированное число);
+#                   "floating" (ТЗ §6, для монет): центр коридора = ЖИВОЙ рыночный курс (середина
+#                   спреда), плывёт вместе с рынком. Для floating нужен max_dev_pct (ширина коридора
+#                   в % от рынка), а initial не используется. У края/при reset — возврат к рыночному курсу.
+#   anchor_ema — (только floating) сглаживание опоры, 0..1: 1/пусто — сырой mid; меньше — плавнее
+#                и инертнее (центр не дёргается от одной чужой заявки). Напр. 0.3.
 #   use_ws — True: брать стакан по WebSocket (быстрая реакция, ТЗ §7); при обрыве бот сам
 #            откатывается на REST-опрос. False/нет — только REST каждые poll_sec.
 #   depth / precision — глубина и округление стакана (по умолчанию depth 20).
+#
+# Отдельные настройки покупки и продажи (ТЗ §4): заведи ДВА рынка с одной парой в поле symbol и
+# разными ключами — у каждого свой side и свои initial/max_dev_pct/min/max и т.д. Бот ведёт их
+# независимо (свои ордера различает по стороне и по префиксу clientOrderId).
 XROCKET_MARKETS = {
+    # Фиксированный коридор:
     # "TON-USDT": {"side": "buy", "step": "0.0001", "initial": "2.10", "max_dev_pct": 2,
     #              "on_limit": "reset", "size": "5", "use_ws": True, "poll_sec": 3},
+    #
+    # Плавающий коридор (±2% от рынка), отдельно покупка и продажа одной пары:
+    # "GRAM-USDT buy":  {"symbol": "GRAM-USDT", "side": "buy",  "step": "0.001", "size": "5",
+    #                    "corridor_mode": "floating", "max_dev_pct": 2, "anchor_ema": 0.3, "poll_sec": 3},
+    # "GRAM-USDT sell": {"symbol": "GRAM-USDT", "side": "sell", "step": "0.001", "size": "5",
+    #                    "corridor_mode": "floating", "max_dev_pct": 2, "anchor_ema": 0.3, "poll_sec": 3},
 }
 
 # Уведомления в Telegram о важных событиях (необязательно): запуск/остановка, падение рынка,
