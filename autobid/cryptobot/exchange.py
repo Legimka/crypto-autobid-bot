@@ -7,8 +7,13 @@
 ордер (🔸) и встаём на шаг «лучше» ближайшего конкурента в пределах коридора. После исполнения ордера
 («Order #… executed successfully») режим «Покупка» переключается на «Продажу», «Продажа» — останавливает.
 
-⚠️  ПОЗИЦИИ КНОПОК (NAV, BTN_*) взяты из СБОРКИ старого бота и соответствуют ТОЙ версии интерфейса
-    CryptoBot. Текущий CryptoBot мог поменять раскладку — перед боевым запуском проверь и, если надо,
+Логика и позиции кнопок СВЕРЕНЫ с оригинальным исходником (cb_win-main: plugins/refresh/
+refreshExchangeNew.py + utils/handelPurchase.py) — перенос точный. Ранний вариант оригинала
+(refreshExchange.py) отменял свой ордер кликом по кнопке с 📔 вместо позиции (14,2); мы используем
+это как первую попытку с откатом на (14,2) — так устойчивее к сдвигу раскладки (см. _replace).
+
+⚠️  ПОЗИЦИИ КНОПОК (NAV, BTN_*) соответствуют ТОЙ версии интерфейса CryptoBot, под которую писался
+    старый бот. Текущий CryptoBot мог поменять раскладку — перед боевым запуском проверь и, если надо,
     перепиши позиции по свежей записи: `python record_chat.py test cryptobot -i`, пройди /exchange и
     посмотри номера кнопок в записи (chat.txt). Решение (decide) от позиций не зависит и тестируется.
 """
@@ -34,6 +39,7 @@ BTN_CONFIRM = (0, 0)                        # подтвердить
 BTN_OK = (1, 0)
 BTN_BACK = (-1, 0)
 CANCEL_SEQ = [BTN_CANCEL, BTN_OK, BTN_OK]   # отменить свой ордер (из refreshExchangeNew)
+CANCEL_TEXT = "📔"                          # кнопка «мои ордера» по тексту (ранний refreshExchange.py)
 
 ORDER_DONE = re.compile(
     r"Order\s+#(\w+)\s+to\s+(buy|sell)\s+🪙\s+([\d.]+)\s+(\w+)\s+for\s+🪙\s+([\d.]+)\s+(\w+)\s+executed successfully\.")
@@ -170,7 +176,11 @@ class ExchangeTrader:
         await self._click_pos([BTN_CONFIRM])
 
     async def _replace(self, value):
-        await self._click_pos(CANCEL_SEQ)
+        # Отмена своего ордера: сначала пробуем кнопку по тексту (📔 — устойчивее к сдвигу
+        # раскладки, так делал ранний refreshExchange.py), иначе по позиции (14,2).
+        if not await self._click_text(CANCEL_TEXT, timeout=4):
+            await self._click_pos([BTN_CANCEL])
+        await self._click_pos([BTN_OK, BTN_OK])
         await self._place(value)
 
     async def step_once(self):
