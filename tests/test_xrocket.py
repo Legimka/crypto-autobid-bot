@@ -43,6 +43,15 @@ def test_parse_orderbook_empty():
     assert ob == {"bids": [], "asks": [], "sequence": None}
 
 
+def test_parse_orderbook_normalizes_order():
+    # REST отдаёт обе стороны по возрастанию — bids должны стать лучшими (выше) сверху
+    raw = {"bids": [["1.073", "1"], ["1.079", "2"], ["1.095", "3"]],
+           "asks": [["1.124", "1"], ["1.102", "2"], ["1.108", "3"]]}
+    ob = X.parse_orderbook(raw)
+    assert [p for p, _ in ob["bids"]] == [Decimal("1.095"), Decimal("1.079"), Decimal("1.073")]
+    assert [p for p, _ in ob["asks"]] == [Decimal("1.102"), Decimal("1.108"), Decimal("1.124")]
+
+
 def test_parse_problem():
     body = '{"type":"/x","title":"Client data validation error","status":400,"detail":"bad size"}'
     assert X.parse_problem(body) == "bad size"

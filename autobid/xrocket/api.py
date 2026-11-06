@@ -98,11 +98,17 @@ def _levels(raw):
 
 def parse_orderbook(data):
     """Ответ стакана → {'bids': [(price,size)], 'asks': [(price,size)], 'sequence': str|None}.
-    bids отсортированы лучшими (бОльшая цена) сверху, asks — лучшими (меньшая цена) сверху."""
+    ВСЕГДА нормализуем порядок: bids — лучшими (бОльшая цена) сверху, asks — лучшими (меньшая)
+    сверху. Это важно: REST отдаёт обе стороны по возрастанию цены (лучший bid — последний),
+    а WS — лучшими сверху; сортировкой приводим к единому виду, на который рассчитан logic.decide."""
     data = data or {}
+    bids = _levels(data.get("bids"))
+    asks = _levels(data.get("asks"))
+    bids.sort(key=lambda lvl: lvl[0], reverse=True)
+    asks.sort(key=lambda lvl: lvl[0])
     return {
-        "bids": _levels(data.get("bids")),
-        "asks": _levels(data.get("asks")),
+        "bids": bids,
+        "asks": asks,
         "sequence": str(data["sequence"]) if data.get("sequence") is not None else None,
     }
 
