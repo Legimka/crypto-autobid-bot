@@ -74,7 +74,8 @@ class P2POutbidder:
         self.max_dev_pp = cfg.get("max_dev_pp")     # коридор плавающей цены, п.п. ratio
         self.initial = cfg.get("initial")           # исходный курс (фикс)
         self.initial_ratio = cfg.get("initial_ratio")
-        self.on_limit = cfg.get("on_limit", "reset")       # у края коридора: 'reset' / 'hold'
+        self.on_limit = cfg.get("on_limit", "reset")       # у края коридора: 'reset' / 'hold' / 'pause'
+        self.limit_pause = float(cfg.get("limit_pause_sec", 30))   # пауза после возврата / в режиме pause
         self.min_price = cfg.get("min_price")              # абсолютные пределы курса (ТЗ §4)
         self.max_price = cfg.get("max_price")
         self.max_jump = cfg.get("max_jump", 5)      # не прыгать больше: % (фикс) / п.п. (плав)
@@ -90,8 +91,18 @@ class P2POutbidder:
         self.cooldown = CooldownGuard(int(cfg.get("cooldown_changes", 5)), float(cfg.get("cooldown_min", 11)))
         self.stability = O.StabilityGuard(int(cfg.get("stability_polls", 2)))   # ТЗ §7: анти-«дёрганье»
         self._changes = {}                                 # offer_id -> сколько раз уже перебили
+        self._paused_until = {}                            # offer_id -> monotonic, до которого не трогаем
         self._names = None
         self._my_names = set()
+
+    def _paused(self, oid, now=None):
+        now = time.monotonic() if now is None else now
+        return self._paused_until.get(oid, 0) > now
+
+    def _pause(self, oid, now=None):
+        if self.limit_pause > 0:
+            now = time.monotonic() if now is None else now
+            self._paused_until[oid] = now + self.limit_pause
 
     async def _ensure_meta(self):
         if self._names is None:
@@ -190,11 +201,23 @@ class P2POutbidder:
         my_ids = await self._my_ids()
         changed = 0
         for p in self.plan(book, my_ids):
-            # Анти-«дёрганье» (ТЗ §7): перебиваем лидера, только если его курс держится несколько
-            # опросов подряд. Возврат к исходному (reset) делаем сразу — это не гонка за конкурентом.
+            oid = p["offer"]["id"]
+            if self._paused(oid):                      # идёт пауза (после возврата / режим pause)
+                continue
+            if p["reset"]:                             # упёрлись в край коридора
+                if self.on_limit == "pause":           # режим «приостановить»: курс не меняем, ждём
+                    self._pause(oid)
+                    self.log(f"[{self.key}] #O{oid}: край коридора — пауза {self.limit_pause:.0f} с (курс не меняю)")
+                    continue
+                if await self.apply(p, my_ids):        # reset → к начальному, hold → на границу
+                    changed += 1
+                    if self.on_limit == "reset":       # вернулись к началу → небольшая пауза (ТЗ п.3)
+                        self._pause(oid)
+                continue
+            # Анти-«дёрганье» (ТЗ §7): перебиваем лидера, только если его курс держится несколько опросов.
             lead = p["leader"]
             lead_price = lead.get("ratio") if p["floating"] else lead.get("p")
-            if not p["reset"] and not self.stability.confirm((p["offer"]["id"], lead.get("id")), lead_price):
+            if not self.stability.confirm((oid, lead.get("id")), lead_price):
                 continue
             if await self.apply(p, my_ids):
                 changed += 1

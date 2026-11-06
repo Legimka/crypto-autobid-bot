@@ -39,8 +39,8 @@ def validate_p2p(key, cfg):
     else:
         if cfg.get("initial") and not cfg.get("max_dev_pct"):
             problems.append("задан initial, но нет max_dev_pct (коридор не ограничен)")
-    if cfg.get("on_limit") not in (None, "reset", "hold"):
-        problems.append(f"on_limit должен быть 'reset' или 'hold', а не {cfg.get('on_limit')!r}")
+    if cfg.get("on_limit") not in (None, "reset", "hold", "pause"):
+        problems.append(f"on_limit должен быть 'reset', 'hold' или 'pause', а не {cfg.get('on_limit')!r}")
     _check_bounds(cfg, problems)
     return problems
 

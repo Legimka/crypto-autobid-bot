@@ -133,6 +133,17 @@ def test_p2p_plan_corridor_reset():
     assert plans and plans[0]["reset"] and plans[0]["value"] == "101.00"
 
 
+def test_p2p_pause_guard():
+    r = _p2p(limit_pause_sec=10)
+    assert not r._paused("O1", now=0)
+    r._pause("O1", now=0)
+    assert r._paused("O1", now=5) and not r._paused("O1", now=11)
+    # limit_pause_sec=0 — пауза выключена
+    r0 = _p2p(limit_pause_sec=0)
+    r0._pause("O1", now=0)
+    assert not r0._paused("O1", now=1)
+
+
 # ------------------------------------------------------------------ защита от частых правок
 def test_cooldown_guard():
     g = CooldownGuard(max_changes=2, cooldown_min=10)      # 2 правки, потом 10 мин
