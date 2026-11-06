@@ -40,36 +40,48 @@ async def main(sym):
     print(f"Сеть: {'TESTNET (тестовая)' if testnet else 'MAINNET — БОЕВОЙ СЧЁТ!'}")
     cli = XRocketExchange(token or None, testnet=testnet)
     try:
+        # 1) пары
         syms = await cli.symbols()
         items = _as_list(syms, "symbols", "data", "result")
+        names = [s.get("symbol") if isinstance(s, dict) else s for s in items]
         print(f"\nПары: получено {len(items)}." if items else f"\nПары (сырой ответ): {_short(syms)}")
-        if items:
-            names = [s.get("symbol") if isinstance(s, dict) else s for s in items[:12]]
-            print("  примеры:", ", ".join(str(n) for n in names))
+        if names:
+            print("  примеры:", ", ".join(str(n) for n in names[:12]))
+        # если запрошенной пары нет на этой сети — берём первую существующую (на testnet TON = GRAM)
+        if names and sym not in names:
+            alt = names[0]
+            print(f"  пары {sym} здесь нет — показываю стакан по {alt}")
+            sym = alt
 
-        ob = await cli.orderbook(sym, depth=5)
-        print(f"\nСтакан {sym}: bids {len(ob['bids'])}, asks {len(ob['asks'])}, seq {ob['sequence']}")
-        if ob["asks"]:
-            print("  лучшие продажи (ask):", ", ".join(f"{p}×{s}" for p, s in ob["asks"][:3]))
-        if ob["bids"]:
-            print("  лучшие покупки (bid):", ", ".join(f"{p}×{s}" for p, s in ob["bids"][:3]))
-        if not ob["bids"] and not ob["asks"]:
-            print("  стакан пуст или форма ответа иная — проверь символ (формат BASE-QUOTE).")
+        # 2) стакан (своя обработка ошибок, чтобы дойти до балансов)
+        try:
+            ob = await cli.orderbook(sym, depth=5)
+            print(f"\nСтакан {sym}: bids {len(ob['bids'])}, asks {len(ob['asks'])}, seq {ob['sequence']}")
+            if ob["asks"]:
+                print("  лучшие продажи (ask):", ", ".join(f"{p}×{s}" for p, s in ob["asks"][:3]))
+            if ob["bids"]:
+                print("  лучшие покупки (bid):", ", ".join(f"{p}×{s}" for p, s in ob["bids"][:3]))
+            if not ob["bids"] and not ob["asks"]:
+                print("  стакан пуст или форма ответа иная.")
+        except XRocketError as e:
+            print(f"\nСтакан {sym}: ошибка — {e}")
 
-        if token:
-            bal = await cli.balances()
-            rows = _as_list(bal, "balances", "data", "result")
-            print(f"\nБалансы Trading: {len(rows)} позиций." if rows else f"\nБалансы (сырой ответ): {_short(bal)}")
-            for b in rows[:20]:
-                if isinstance(b, dict):
-                    print(f"  {b.get('asset')}: баланс {b.get('balance')}, доступно {b.get('available')}, "
-                          f"в ордерах {b.get('holds')}")
-            print("\nСвязь с аккаунтом есть — токен принят. ✅")
-        else:
+        # 3) балансы (нужен токен)
+        if not token:
             print("\nТокен не задан (XROCKET_TOKEN в config.py) — балансы пропущены. "
                   "Публичная связь с биржей работает. ✅")
+            return
+        bal = await cli.balances()
+        rows = _as_list(bal, "balances", "data", "result")
+        print(f"\nБалансы Trading: {len(rows)} позиций." if rows else f"\nБалансы (сырой ответ): {_short(bal)}")
+        for b in rows[:20]:
+            if isinstance(b, dict):
+                print(f"  {b.get('asset')}: баланс {b.get('balance')}, доступно {b.get('available')}, "
+                      f"в ордерах {b.get('holds')}")
+        print("\nСвязь с аккаунтом есть — токен принят. ✅")
     except AuthError as e:
-        print(f"\nТокен не принят ({e.status}): {e.detail}. Проверь XROCKET_TOKEN и XROCKET_TESTNET в config.py.")
+        print(f"\nТокен не принят ({e.status}): {e.detail}. Проверь XROCKET_TOKEN и XROCKET_TESTNET в config.py "
+              "(токен должен быть из @xrocket_testnet_bot).")
     except RateLimited as e:
         print(f"\nЛимит частоты (429), подождать {e.retry_after} с.")
     except XRocketError as e:

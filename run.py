@@ -2,18 +2,19 @@
 Запуск автоперебивки CryptoBot. Читает config.py (MARKETS — P2P, EXCHANGE — биржа) и держит
 все включённые рынки 24/7.
 
-    python run.py            все включённые рынки (P2P + биржа)
-    python run.py p2p        только P2P
-    python run.py exchange   только биржа
+    python run.py            все включённые рынки (P2P + биржа CryptoBot + xRocket)
+    python run.py p2p        только P2P CryptoBot
+    python run.py exchange   только биржа CryptoBot
+    python run.py xrocket    только биржа xRocket
 
 Ctrl+C — мягкая остановка.
-Перед первым запуском: install.bat, затем заполни config.py (API_ID/API_HASH, MY_NICKNAME, рынки)
-и войди в аккаунт — python qr_login.py <имя_сессии>.
+Перед первым запуском: install.bat, затем заполни config.py и войди в аккаунт(ы):
+  CryptoBot — python qr_login.py <имя_сессии>; xRocket — токен в config.py (XROCKET_TOKEN).
 """
 import asyncio
 import sys
 
-MODES = ("all", "p2p", "exchange")
+MODES = ("all", "p2p", "exchange", "xrocket")
 
 
 def main():

@@ -36,6 +36,16 @@ def test_validate_exchange():
     assert any("mode" in x for x in p2)
 
 
+def test_validate_xrocket_fields():
+    # поля, не зависящие от наличия токена
+    p = runner.validate_xrocket("TON-USDT", {"side": "buy"})
+    assert any("step" in x for x in p) and any("size" in x for x in p)
+    p2 = runner.validate_xrocket("TON-USDT", {"step": "0.01", "size": "5", "side": "up"})
+    assert any("side" in x for x in p2)
+    p3 = runner.validate_xrocket("TON-USDT", {"step": "0.01", "size": "5", "on_limit": "wat"})
+    assert any("on_limit" in x for x in p3)
+
+
 # ------------------------------------------------------------------ состояние между запусками
 def test_state_store_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setattr(state, "_dir", lambda: str(tmp_path))

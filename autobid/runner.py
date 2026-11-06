@@ -18,6 +18,7 @@ import random
 from . import logging_setup, settings
 from .cryptobot import exchange as exchange_mod
 from .cryptobot import p2p as p2p_mod
+from .xrocket import trader as xrocket_mod
 
 BACKOFF_START = 10
 BACKOFF_MAX = 120
@@ -46,7 +47,7 @@ def validate_p2p(key, cfg):
 
 
 def validate_exchange(key, cfg):
-    """Список проблем конфига биржевого рынка (пусто — всё хорошо)."""
+    """Список проблем конфига биржевого рынка CryptoBot (пусто — всё хорошо)."""
     problems = []
     if not cfg.get("session"):
         problems.append("не задан session")
@@ -56,6 +57,25 @@ def validate_exchange(key, cfg):
         problems.append("не задан step (шаг перебивки)")
     if str(cfg.get("mode", "Buy")).lower() not in ("buy", "sell"):
         problems.append(f"mode должен быть 'Buy' или 'Sell', а не {cfg.get('mode')!r}")
+    _check_bounds(cfg, problems)
+    return problems
+
+
+def validate_xrocket(key, cfg):
+    """Список проблем конфига биржевого рынка xRocket (пусто — всё хорошо). Токен проверяется при старте."""
+    problems = []
+    if not settings.get("XROCKET_TOKEN"):
+        problems.append("не задан XROCKET_TOKEN в config.py")
+    if not cfg.get("step"):
+        problems.append("не задан step (шаг перебивки)")
+    if not (cfg.get("size") or cfg.get("amount")):
+        problems.append("не задан size (объём ордера)")
+    if str(cfg.get("side", "buy")).lower() not in ("buy", "sell"):
+        problems.append(f"side должен быть 'buy' или 'sell', а не {cfg.get('side')!r}")
+    if cfg.get("on_limit") not in (None, "reset", "hold", "pause"):
+        problems.append(f"on_limit должен быть 'reset', 'hold' или 'pause', а не {cfg.get('on_limit')!r}")
+    if cfg.get("initial") and not cfg.get("max_dev_pct"):
+        problems.append("задан initial, но нет max_dev_pct (коридор не ограничен)")
     _check_bounds(cfg, problems)
     return problems
 
@@ -80,6 +100,10 @@ def _jobs(which):
         for key, cfg in (settings.get("EXCHANGE") or {}).items():
             if _enabled(cfg):
                 jobs.append((f"Биржа {key}", key, cfg, "exchange"))
+    if which in ("all", "xrocket"):
+        for key, cfg in (settings.get("XROCKET_MARKETS") or {}).items():
+            if _enabled(cfg):
+                jobs.append((f"xRocket {key}", key, cfg, "xrocket"))
     return jobs
 
 
@@ -93,7 +117,7 @@ async def _sleep_or_stop(sec, stop):
 
 async def _close(trader):
     """Закрыть http-сессии клиентов рынка, если они есть (у P2P — observer/trader)."""
-    for attr in ("observer", "trader"):
+    for attr in ("observer", "trader", "api"):
         c = getattr(trader, attr, None)
         if c is not None and hasattr(c, "close"):
             try:
@@ -135,9 +159,13 @@ def _make_factory(key, cfg, kind, log):
     def to_log(msg):
         log.info("%s", msg)
 
+    trade_log = logging_setup.TradeLog()
+
     async def make():
         if kind == "p2p":
             return await p2p_mod.build(key, cfg, log=to_log)
+        if kind == "xrocket":
+            return await xrocket_mod.build(key, cfg, log=to_log, trade_log=trade_log)
         return await exchange_mod.build(key, cfg, log=to_log)
 
     return make
@@ -154,8 +182,9 @@ async def run_all(which="all", stop=None, log=None):
         return
 
     tasks, started = [], []
+    validators = {"p2p": validate_p2p, "exchange": validate_exchange, "xrocket": validate_xrocket}
     for label, key, cfg, kind in jobs:
-        problems = validate_p2p(key, cfg) if kind == "p2p" else validate_exchange(key, cfg)
+        problems = validators[kind](key, cfg)
         if problems:
             log.error("[%s] пропущен — проблемы в настройках: %s", label, "; ".join(problems))
             continue
