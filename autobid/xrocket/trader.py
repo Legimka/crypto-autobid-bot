@@ -37,13 +37,15 @@ def _as_list(data, *keys):
     return []
 
 
-def my_order_for(orders, sym, side):
-    """Свой активный ордер по паре и стороне (не в финальном статусе). Первый подходящий."""
+def my_order_for(orders, sym, side, prefix=CLIENT_PREFIX):
+    """Свой активный ордер по паре и стороне (не в финальном статусе). Свои узнаём по префиксу
+    clientOrderId, чтобы не трогать ордера, которые пользователь выставил вручную на той же паре."""
     for o in orders:
         if not isinstance(o, dict):
             continue
         if o.get("symbol") == sym and str(o.get("side", "")).lower() == side \
-                and str(o.get("status", "")).lower() not in TERMINAL_STATUS:
+                and str(o.get("status", "")).lower() not in TERMINAL_STATUS \
+                and str(o.get("clientOrderId") or "").startswith(prefix):
             return o
     return None
 
@@ -82,7 +84,14 @@ class XRocketTrader:
         self._changes = 0
         self._last_change = 0.0
         self._paused_until = 0.0
-        self._client_id = f"{CLIENT_PREFIX}-{self.sym}-{self.side}"
+        self._seq = 0
+        self._cid_base = f"{CLIENT_PREFIX}-{self.sym}-{self.side}"   # ключ анти-дёрганья и префикс своих ордеров
+
+    def _new_client_id(self):
+        """Уникальный clientOrderId на каждую постановку: xRocket не разрешает повторять его даже
+        после отмены. Префикс общий — по нему узнаём свои ордера (my_order_for)."""
+        self._seq += 1
+        return f"{self._cid_base}-{int(time.time() * 1000)}-{self._seq}"
 
     def _paused(self, now=None):
         now = time.monotonic() if now is None else now
@@ -96,7 +105,7 @@ class XRocketTrader:
 
     async def _my_order(self):
         data = await self.api.active_orders()
-        return my_order_for(_as_list(data, "orders", "data", "result"), self.sym, self.side)
+        return my_order_for(_as_list(data, "orders", "data", "result"), self.sym, self.side, CLIENT_PREFIX)
 
     async def step_once(self):
         if self._paused():
@@ -130,7 +139,7 @@ class XRocketTrader:
                 self.log(f"[{self.key}] скачок больше max_jump={self.max_jump} — пропускаю (аномалия?)")
                 return "jump"
             comp = logic.best_competitor(ob["bids"] if self.side == "buy" else ob["asks"], my_price, my_size)
-            if comp and not self.stability.confirm(self._client_id, comp[0]):
+            if comp and not self.stability.confirm(self._cid_base, comp[0]):
                 return "flap"                                 # конкурент ещё не продержался N опросов
 
         if not self.size:
@@ -139,7 +148,7 @@ class XRocketTrader:
 
         if act == "replace" and mine:
             await self.api.cancel(order_id=mine.get("id"))    # смены цены нет → отмена + новый ордер
-        await self.api.place_limit(self.sym, self.side, d["price"], self.size, client_id=self._client_id)
+        await self.api.place_limit(self.sym, self.side, d["price"], self.size, client_id=self._new_client_id())
 
         self._changes += 1
         self._last_change = now
@@ -152,11 +161,22 @@ class XRocketTrader:
                                   new=str(d["price"]), reset=d["reset"], changes=self._changes)
         return act
 
+    async def _sleep(self, sec, stop_event):
+        """Пауза, прерываемая остановкой, — чтобы бот быстро реагировал на Ctrl+C/аварийный стоп."""
+        if stop_event is None:
+            await asyncio.sleep(sec)
+            return
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=sec)
+        except asyncio.TimeoutError:
+            pass
+
     async def run(self, stop_event=None):
         self.log(f"[{self.key}] xRocket запущена: {self.sym} {self.side}, шаг {self.step}, "
                  f"опрос каждые {self.poll:.0f} с")
         errors = 0
         while stop_event is None or not stop_event.is_set():
+            extra = 0
             try:
                 await self.step_once()
                 errors = 0
@@ -164,19 +184,19 @@ class XRocketTrader:
                 self.log(f"[{self.key}] токен не принят ({e.status}) — останавливаю рынок: {e.detail}")
                 return
             except RateLimited as e:
-                wait = e.retry_after or self.poll * 5
-                self.log(f"[{self.key}] лимит частоты (429) — пауза {wait:.0f} с")
-                await asyncio.sleep(wait)
-                continue
+                extra = e.retry_after or self.poll * 5
+                self.log(f"[{self.key}] лимит частоты (429) — пауза {extra:.0f} с")
             except XRocketError as e:
                 errors += 1
                 self.log(f"[{self.key}] ошибка API: {e}")
-                if errors >= 5:                               # череда ошибок → длинная пауза (ТЗ §7)
-                    await asyncio.sleep(min(self.poll * 2 ** errors, 120))
+                if errors >= 5:                               # череда ошибок → пауза подольше (ТЗ §7)
+                    extra = min(self.poll * errors, 60)
             except Exception as e:
                 errors += 1
                 self.log(f"[{self.key}] сбой прохода: {type(e).__name__}: {str(e)[:200]}")
-            await asyncio.sleep(self.poll)
+                if errors >= 5:
+                    extra = min(self.poll * errors, 60)
+            await self._sleep(self.poll + extra, stop_event)
 
 
 async def build(market_key, cfg, log=print, trade_log=None):
